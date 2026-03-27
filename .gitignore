@@ -1,0 +1,5 @@
+#全局忽略
+*.pdf
+*.exe
+temp/*
+datasets/*
