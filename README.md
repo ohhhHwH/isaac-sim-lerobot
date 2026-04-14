@@ -85,3 +85,87 @@ main()
 ```bash
 python isaac-sim.py
 ```
+
+----
+
+实现 关节控制场景下机械臂末端位姿、三维坐标等信息的输出，移动情况下每隔1s更新，若不移动，输出最后的信息后不进行输出
+
+----
+
+添加机械臂移动的demo，实现输入一个三维坐标和末端位姿，机械臂夹爪向三维坐标移动的demo, 实现 c 切换 控制模式
+
+----
+
+实现夹爪上相机跟随视角，在gripper_static_1夹爪模型上添加一个跟随视角，视角朝向夹爪爪子，能够看到夹爪爪子和夹爪前方的空间.保证相机空间坐标系与gripper_static_1空间坐标系的相对位置不改变，切换视角前输出其相对坐标的delta值，并在输出EE Pose时同时输出相机的ee pose
+
+
+----
+
+<body name="gripper_static_1" pos="0.001353 7e-06 -0.045">
+  <camera name="gripper_cam" pos="0 0.08 0" xyaxes="1 0 0 0 0.8 -0.6"/>
+
+  
+              <inertial pos="0.00544111 0.000115633 -0.0190522" quat="0.687452 -0.165558 -0.165558 0.687452" mass="0.230086" diaginertia="8.4e-05 7.82036e-05 3.37964e-05"/>
+              <joint name="joint5" pos="0 0 0" axis="0 0 -1"/>
+              <!-- 夹爪跟随相机：位于关节连接处，朝夹爪方向看 -->
+              <camera name="gripper_cam" pos="0 0.08 0" xyaxes="1 0 0 0 0.8 -0.6"/>
+              <geom pos="-0.001528 -0.105265 -0.122394" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="gripper_static_1"/>
+              <geom pos="-0.001528 -0.105265 -0.122394" quat="1 0 0 0" type="mesh" mesh="gripper_static_1"/>
+              <body name="gripper_moving_1" pos="-0.0074 -0.00025 -0.01315">
+                <inertial pos="0.0010956 0.000310904 -0.0251131" quat="0.997878 0 -0.0651045 0" mass="0.100606" diaginertia="2.72621e-05 1.9e-05 1.17379e-05"/>
+                <joint name="joint_gripper" pos="0 0 0" axis="0 -1 0" range="0 1.74533"/>
+                <geom pos="0.005872 -0.105015 -0.109244" type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="gripper_moving_1"/>
+                <geom pos="0.005872 -0.105015 -0.109244" type="mesh" mesh="gripper_moving_1"/>
+              </body>
+            </body>
+
+
+
+----
+完善SimIsaacModel class使其他python文件能够引用这个类进行机械臂的控制
+
+
+class isaaclab.sensors.Camera[源代码]
+基类：SensorBase
+
+The camera sensor for acquiring visual data.
+
+This class wraps over the UsdGeom Camera for providing a consistent API for acquiring visual data. It ensures that the camera follows the ROS convention for the coordinate system.
+
+Summarizing from the replicator extension, the following sensor types are supported:
+
+"rgb": A 3-channel rendered color image.
+
+"rgba": A 4-channel rendered color image with alpha channel.
+
+"distance_to_camera": An image containing the distance to camera optical center.
+
+"distance_to_image_plane": An image containing distances of 3D points from camera plane along camera's z-axis.
+
+"depth": The same as "distance_to_image_plane".
+
+"normals": An image containing the local surface normal vectors at each pixel.
+
+"motion_vectors": An image containing the motion vector data at each pixel.
+
+"semantic_segmentation": The semantic segmentation data.
+
+"instance_segmentation_fast": The instance segmentation data.
+
+"instance_id_segmentation_fast": The instance id segmentation data.
+
+
+----
+
+
+实现KeyboardController 和 SimIsaacModel 并完成 main函数，不允许修改KeyboardController和SimIsaacModel中原有的函数说明，优先依照注释中内容来实现代码
+
+
+
+TODO:加 UI 窗口 实现切换视角，加 臂上相机，
+
+
+----
+
+@data_produce_init.py 参考初版设计方案 @isaac_koch.py 参考SimIsaacModel 接口及其定义，完善mian函数，使用isaac_koch中定义的相关接口函数，注意保留原来的注释，生成SimIsaacProduce管理环境中其他物体如方块等物体,仅修改data_produce.py文件，不修改isaac_koch中内容
+

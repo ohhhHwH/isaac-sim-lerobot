@@ -46,22 +46,18 @@ from isaaclab.utils import configclass
 
 URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urdf", "koch.urdf")
 
-# Table dimensions
-TABLE_HEIGHT = 0.05
-TABLE_SIZE = (0.3, 0.4, TABLE_HEIGHT)
-TABLE_POS = (0.2, 0.0, TABLE_HEIGHT / 2)  # in front of the robot base
-
-# Object randomization ranges (on table surface)
-OBJ_X_RANGE = (0.10, 0.30)   # forward from robot base
-OBJ_Y_RANGE = (-0.15, 0.15)  # left-right
+# Object randomization ranges (in front of robot arm, on ground plane)
+OBJ_X_RANGE = (-0.05, 0.05)   # left-right (narrow, centered)
+OBJ_Y_RANGE = (0.10, 0.25)    # forward from robot base (robot正面方向)
+OBJ_Z = 0.015                 # half cube size, sitting on ground
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
 # Place target (fixed position to drop the object)
-PLACE_POS = (0.15, 0.15, TABLE_HEIGHT + 0.05)
+PLACE_POS = (0.05, 0.15, 0.05)
 
 # Grasp approach parameters
 PRE_GRASP_HEIGHT_OFFSET = 0.08  # meters above the object for pre-grasp
-LIFT_HEIGHT = 0.15  # meters above table after grasping
+LIFT_HEIGHT = 0.15  # meters above ground after grasping
 
 # Gripper joint values
 GRIPPER_OPEN = 0.0
@@ -123,7 +119,7 @@ KOCH_CFG = ArticulationCfg(
 
 @configclass
 class GraspSceneCfg(InteractiveSceneCfg):
-    """Scene with Koch arm + table + object + two cameras."""
+    """Scene with Koch arm + object + two cameras (no table)."""
 
     # --- Environment basics ---
     ground = AssetBaseCfg(
@@ -138,21 +134,7 @@ class GraspSceneCfg(InteractiveSceneCfg):
     # --- Koch arm ---
     koch = KOCH_CFG.replace(prim_path="{ENV_REGEX_NS}/Koch")
 
-    # --- Table (fixed rigid body) ---
-    table = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Table",
-        spawn=sim_utils.CuboidCfg(
-            size=TABLE_SIZE,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.6, 0.4, 0.2)),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=TABLE_POS),
-    )
-
     # --- Target object (dynamic cuboid, will be randomized) ---
-    # TODO: 用 RigidObjectCfg 替代 AssetBaseCfg 以支持动态物理
-    # TODO: 添加随机颜色材质
     cube = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cube",
         spawn=sim_utils.CuboidCfg(
@@ -163,7 +145,7 @@ class GraspSceneCfg(InteractiveSceneCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(TABLE_POS[0], 0.0, TABLE_HEIGHT + 0.015),
+            pos=(0.0, 0.15, OBJ_Z),
         ),
     )
 
@@ -177,7 +159,7 @@ class GraspSceneCfg(InteractiveSceneCfg):
             clipping_range=(0.1, 5.0),
         ),
         offset=CameraCfg.OffsetCfg(
-            pos=(0.2, 0.0, 0.6),       # above the table center
+            pos=(0.0, 0.15, 0.6),      # above the object spawn area (in front of robot)
             rot=(0.0, 0.0, 1.0, 0.0),  # looking straight down (180° around Y)
             convention="world",
         ),
@@ -209,37 +191,114 @@ class GraspSceneCfg(InteractiveSceneCfg):
 
 
 # =============================================================================
-# Section 4: Inverse Kinematics Helper
+# Section 4: Forward Kinematics & Inverse Kinematics
 # =============================================================================
 
-def solve_ik(robot: Articulation, target_pos_world: tuple, target_orient: tuple | None = None) -> torch.Tensor:
-    """Solve IK for the Koch arm to reach a target position in world frame.
+# Koch arm joint configuration from URDF:
+#   (translation_xyz, rotation_axis, axis_sign)
+_JOINT_CHAIN = [
+    ((0.0, 0.0, 0.039),              'z',  1),   # joint1: base yaw
+    ((-0.0002, 0.0, 0.0173),         'x', -1),   # joint2: shoulder pitch
+    ((0.00025, 0.014791, 0.108347),   'x',  1),   # joint3: elbow pitch
+    ((0.000125, 0.090467, 0.002747),  'x',  1),   # joint4: wrist pitch
+    ((0.001353, 0.000007, -0.045),    'z', -1),   # joint5: wrist roll
+    ((-0.0074, -0.00025, -0.01315),   'y', -1),   # joint_gripper
+]
+
+
+def _make_transform(tx: float, ty: float, tz: float, axis: str, angle: float) -> torch.Tensor:
+    """Build a 4x4 homogeneous matrix: Translation(tx,ty,tz) @ Rotation(axis, angle)."""
+    c, s = math.cos(angle), math.sin(angle)
+    T = torch.eye(4, dtype=torch.float32)
+    T[0, 3], T[1, 3], T[2, 3] = tx, ty, tz
+    if axis == 'x':
+        T[1, 1], T[1, 2] = c, -s
+        T[2, 1], T[2, 2] = s,  c
+    elif axis == 'y':
+        T[0, 0], T[0, 2] =  c, s
+        T[2, 0], T[2, 2] = -s, c
+    else:  # z
+        T[0, 0], T[0, 1] = c, -s
+        T[1, 0], T[1, 1] = s,  c
+    return T
+
+
+def forward_kinematics(joint_angles, up_to_joint: int = 5) -> torch.Tensor:
+    """Compute end-effector pose via forward kinematics.
+
+    Args:
+        joint_angles: Sequence of 6 joint angles [q1..q5, q_gripper].
+        up_to_joint: Number of joints to chain (1-6). Default 5 gives
+                     gripper_static frame (ignoring gripper open/close).
+
+    Returns:
+        T: (4, 4) homogeneous transform of the end-effector in base frame.
+           Position = T[:3, 3], rotation = T[:3, :3].
+    """
+    T = torch.eye(4, dtype=torch.float32)
+    for i in range(min(up_to_joint, 6)):
+        (tx, ty, tz), axis, sign = _JOINT_CHAIN[i]
+        q = float(joint_angles[i])
+        T = T @ _make_transform(tx, ty, tz, axis, sign * q)
+    return T
+
+
+def solve_ik(
+    robot: Articulation,
+    target_pos_world: tuple,
+    target_orient: tuple | None = None,
+    max_iter: int = 200,
+    tol: float = 0.001,
+    damping: float = 0.01,
+    lr: float = 0.5,
+) -> torch.Tensor:
+    """Solve IK using numerical Jacobian with damped least squares.
+
+    Iteratively adjusts arm joints (0-4) to move the end-effector toward
+    the target position. Gripper joint (index 5) is left unchanged.
 
     Args:
         robot: The Koch Articulation instance.
         target_pos_world: (x, y, z) desired end-effector position.
-        target_orient: (qw, qx, qy, qz) desired orientation, or None for default.
+        target_orient: (qw, qx, qy, qz) desired orientation (unused for now).
+        max_iter: Maximum solver iterations.
+        tol: Convergence tolerance in meters.
+        damping: Damped least squares regularization factor.
+        lr: Step size for joint updates.
 
     Returns:
-        joint_positions: (6,) tensor of target joint angles.
-
-    TODO: 实现逆运动学求解
-    方案选择 (按优先级):
-      1. isaaclab.controllers.DifferentialIKController
-         - 基于雅可比矩阵的迭代求解
-         - 需要 end-effector frame name
-         - 参考: IsaacLab/scripts/tutorials/05_controllers/run_diff_ik.py
-      2. 解析解 (analytic IK)
-         - Koch 是 5+1 DOF, 可能存在解析解
-         - 需要手动推导 DH 参数
-      3. 简单几何方法
-         - 对于桌面抓取, 末端垂直向下时可简化为 2D 平面问题
-         - joint1 控制旋转, joint2-4 控制伸展高度
-
-    临时方案: 返回预设关节角度 (调试用)
+        joint_positions: (num_joints,) tensor of target joint angles.
     """
-    # TODO: replace with actual IK solver
-    return robot.data.default_joint_pos[0].clone()
+    q = robot.data.default_joint_pos[0].clone().cpu().float()
+    target = torch.tensor(target_pos_world, dtype=torch.float32)
+    num_arm_joints = 5  # joints 0-4, skip gripper
+    eps = 1e-4
+
+    for iteration in range(max_iter):
+        T = forward_kinematics(q, up_to_joint=5)
+        ee_pos = T[:3, 3]
+        error = target - ee_pos
+
+        if error.norm().item() < tol:
+            break
+
+        # Numerical Jacobian (3 x 5)
+        J = torch.zeros(3, num_arm_joints)
+        for j in range(num_arm_joints):
+            q_pert = q.clone()
+            q_pert[j] += eps
+            T_pert = forward_kinematics(q_pert, up_to_joint=5)
+            J[:, j] = (T_pert[:3, 3] - ee_pos) / eps
+
+        # Damped least squares: dq = J^T (J J^T + λI)^{-1} error
+        JJT = J @ J.T + damping * torch.eye(3)
+        dq = J.T @ torch.linalg.solve(JJT, error)
+        q[:num_arm_joints] += lr * dq
+
+    if error.norm().item() >= tol:
+        print(f"  [IK] Warning: did not converge, residual={error.norm().item():.4f}m")
+
+    return q.to(robot.device)
 
 
 # =============================================================================
@@ -315,7 +374,7 @@ def plan_grasp_trajectory(
     })
 
     # --- Phase 4: Lift object ---
-    lift_pos = (object_pos[0], object_pos[1], TABLE_HEIGHT + LIFT_HEIGHT)
+    lift_pos = (object_pos[0], object_pos[1], LIFT_HEIGHT)
     lift_joints = solve_ik(robot, lift_pos)
     phases.append({
         "name": "lift",
@@ -324,7 +383,7 @@ def plan_grasp_trajectory(
     })
 
     # --- Phase 5: Move to place position ---
-    pre_place_pos = (place_pos[0], place_pos[1], TABLE_HEIGHT + LIFT_HEIGHT)
+    pre_place_pos = (place_pos[0], place_pos[1], LIFT_HEIGHT)
     pre_place_joints = solve_ik(robot, pre_place_pos)
     phases.append({
         "name": "move_to_place",
@@ -369,8 +428,7 @@ def randomize_object(cube, env_origins: torch.Tensor) -> tuple:
     # --- 随机位置 ---
     x = random.uniform(*OBJ_X_RANGE)
     y = random.uniform(*OBJ_Y_RANGE)
-    obj_half_size = 0.015  # half of default 0.03 cube
-    z = TABLE_HEIGHT + obj_half_size
+    z = OBJ_Z
     object_pos = (x, y, z)
 
     # --- 随机朝向 (仅 yaw) ---
@@ -601,7 +659,7 @@ def run_data_generation(sim: sim_utils.SimulationContext, scene: InteractiveScen
 # =============================================================================
 
 def main():
-    num_episodes=1000
+    num_episodes=2
     output_dir = "datasets/grasp_v1"
     
     args_cli.num_episodes = num_episodes
