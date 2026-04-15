@@ -22,6 +22,7 @@ import time
 
 # isaacsim 依赖库
 import omni
+import omni.ui as ui
 import isaacsim.core.api
 from isaacsim.core.api import World
 from omni.kit.viewport.utility import get_viewport_from_window_name
@@ -313,6 +314,8 @@ class SimIsaacModel:
         })
         self.add_sensor_view("gripper_cam",
                              "/World/envs/env_0/Koch/gripper_static_1/gripper_cam")
+        
+        # self.add_viewport("top")  # 启动时默认显示 top 视角的 viewport TODO 仍有问题，仍需手动添加
 
         print("[INFO]: SimIsaacModel setup complete.")
 
@@ -421,6 +424,92 @@ class SimIsaacModel:
                 self._viewport.set_active_camera(cam_path)
                 print(f"[View] Switched to: '{name}'")
 
+    # ui 中 添加一个 viewport，并设置 指定的 view (根据view name) TODO 仍有问题，仍需手动添加
+    def add_viewport(self, view_name):
+        """
+        在 UI 中创建一个新的 3D viewport 窗口，并设置为指定的视角。
+        创建独立的 viewport 窗口，不影响主 viewport。
+
+        Parameters
+        ----------
+        view_name : str
+            要显示的视角名称，必须是已通过 add_view() 或 add_sensor_view() 添加的视角
+
+        Returns
+        -------
+        viewport or None
+            成功时返回新创建的 viewport 对象，失败时返回 None
+        """
+        import asyncio
+
+        if view_name not in self._views:
+            print(f"[Viewport] Error: view '{view_name}' not found. Available views: {list(self._views.keys())}")
+            return None
+
+        camera_path = self._views[view_name]["camera_path"]
+        window_name = f"{view_name}_Viewport"
+
+        try:
+            # 使用 viewport API 创建新的 3D viewport 窗口
+            viewport_api = omni.kit.viewport.utility.get_viewport_interface()
+
+            # 创建新的 viewport 窗口
+            viewport_api.create_viewport_window(window_name)
+
+            # 异步等待窗口创建并设置相机
+            asyncio.ensure_future(self._setup_viewport_camera(window_name, camera_path, view_name))
+
+            print(f"[Viewport] Creating viewport window '{window_name}' for camera '{camera_path}'")
+            print(f"[Viewport] Window will be docked next to main Viewport once ready")
+
+            return window_name
+
+        except Exception as e:
+            print(f"[Viewport] Failed to create viewport window: {e}")
+            print(f"[Viewport] Tip: You can use switch_view('{view_name}') to change the main viewport instead")
+            return None
+
+    async def _setup_viewport_camera(self, window_name: str, camera_path: str, view_name: str):
+        """异步设置 viewport 的相机并停靠窗口"""
+        # 等待窗口创建完成
+        for i in range(10):
+            await omni.kit.app.get_app().next_update_async()
+
+            # 尝试获取新创建的 viewport
+            new_viewport = get_viewport_from_window_name(window_name)
+
+            if new_viewport:
+                # 设置相机路径
+                new_viewport.set_active_camera(camera_path)
+                print(f"[Viewport] Successfully set camera '{camera_path}' for viewport '{window_name}'")
+
+                # 停靠窗口
+                await self._dock_viewport_window(window_name)
+                return
+
+        print(f"[Viewport] Warning: Could not get viewport handle for '{window_name}' after creation")
+
+    async def _dock_viewport_window(self, window_name: str):
+        """异步停靠 viewport 窗口到主 Viewport 旁边"""
+        # 等待窗口在 workspace 中可用
+        for _ in range(5):
+            if ui.Workspace.get_window(window_name):
+                break
+            await omni.kit.app.get_app().next_update_async()
+
+        # 获取窗口引用
+        custom_window = ui.Workspace.get_window(window_name)
+        viewport_window = ui.Workspace.get_window("Viewport")
+
+        if custom_window and viewport_window:
+            # 停靠到主 Viewport 窗口右侧
+            custom_window.dock_in(viewport_window, ui.DockPosition.RIGHT, 0.5)
+            print(f"[Viewport] Docked '{window_name}' next to main Viewport")
+        elif custom_window:
+            print(f"[Viewport] Window '{window_name}' created but could not dock (main Viewport not found)")
+        else:
+            print(f"[Viewport] Could not find window '{window_name}' in workspace")
+    
     # 切换稳定模式（增加阻尼，减少晃动）
     def toggle_stable_mode(self, enable):
         self._stable_mode = enable
@@ -1157,7 +1246,6 @@ def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float =
 if __name__ == "__main__":
     # demo_control()
     data_produce()
-    simulation_app.close()
 
 # 最后关闭
 simulation_app.close()

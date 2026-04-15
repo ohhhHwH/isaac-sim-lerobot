@@ -3,3 +3,5 @@
 *.exe
 temp/*
 datasets/*
+
+prompt.md

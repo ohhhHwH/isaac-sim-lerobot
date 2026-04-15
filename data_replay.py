@@ -18,6 +18,8 @@ Usage:
 
     # Replay all episodes in sequence
     ./IsaacLab/isaaclab.sh -p data_replay.py --dataset datasets/grasp_v1 --all
+    
+python data_replay.py --dataset datasets/grasp_v1 --episode 0
 """
 
 import argparse
