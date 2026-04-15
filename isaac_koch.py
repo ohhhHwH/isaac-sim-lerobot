@@ -29,7 +29,7 @@ from omni.kit.viewport.utility.camera_state import ViewportCameraState
 from pxr import Gf, Sdf, UsdGeom
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg, RigidObject
 from isaaclab.assets.articulation import Articulation, ArticulationCfg
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.managers import SceneEntityCfg
@@ -38,12 +38,38 @@ from isaaclab.sensors import CameraCfg, Camera
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, subtract_frame_transforms
 from isaaclab.sim.utils.stage import get_current_stage
+import h5py
+import random
 
 
 # --- 常量配置 ---
 URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urdf", "koch.urdf")
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint_gripper"]
 ANGLE_STEP = 0.05  # 每次按键旋转弧度 (~2.9°)
+
+# Object randomization ranges (from data_produce.py)
+OBJ_X_RANGE = (-0.05, 0.05)   # left-right (narrow, centered)
+OBJ_Y_RANGE = (0.10, 0.25)    # forward from robot base
+OBJ_Z = 0.015                 # half cube size, sitting on ground
+OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
+
+# Gripper joint values
+GRIPPER_OPEN = 0.0
+GRIPPER_CLOSED = -0.6
+
+# Trajectory interpolation
+STEPS_PER_PHASE = 30
+
+# Camera resolution
+CAM_WIDTH = 640
+CAM_HEIGHT = 480
+
+# Place target
+PLACE_POS = (0.05, 0.15, 0.05)
+
+# Grasp approach parameters
+PRE_GRASP_HEIGHT_OFFSET = 0.08
+LIFT_HEIGHT = 0.15
 
 # Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
 _JOINT_CHAIN = [
@@ -149,6 +175,8 @@ class SimIsaacModel:
         self._speed = 1.0
         self._views = {}  # name -> CameraCfg
         self._stable_mode = False
+        self._random_objects = []  # Track random objects for cleanup
+        self._object_counter = 0  # Counter for unique object names
 
         # 更新 URDF 路径
         self.KOCH_CFG = SimIsaacModel.KOCH_CFG.replace(
@@ -188,6 +216,21 @@ class SimIsaacModel:
             )
             koch = self.KOCH_CFG.replace(prim_path="{ENV_REGEX_NS}/Koch")
 
+            # Target object (dynamic cuboid, will be randomized)
+            cube = RigidObjectCfg(
+                prim_path="{ENV_REGEX_NS}/Cube",
+                spawn=sim_utils.CuboidCfg(
+                    size=(0.03, 0.03, 0.03),
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
+                ),
+                init_state=RigidObjectCfg.InitialStateCfg(
+                    pos=(0.0, 0.15, OBJ_Z),
+                ),
+            )
+
             # 挂载在 gripper_static_1 上的相机传感器，严格参考 MuJoCo:
             # <camera name="gripper_cam" pos="0 0.08 0" xyaxes="1 0 0 0 0.8 -0.6"/>
             # 其中 xyaxes 对应旋转矩阵列向量:
@@ -197,8 +240,8 @@ class SimIsaacModel:
                 # 相机在 USD stage 中的 prim 路径（挂在 gripper_static_1 下）
                 prim_path="{ENV_REGEX_NS}/Koch/gripper_static_1/gripper_cam",
                 update_period=0.1, # 传感器输出周期（秒）：每 0.1s 输出一次数据
-                height=480, # 输出图像分辨率（像素）
-                width=640,
+                height=CAM_HEIGHT, # 输出图像分辨率（像素）
+                width=CAM_WIDTH,
                 data_types=["rgb"], # 需要的输出数据类型（此处只要 RGB 图像）
                 # Pinhole 相机模型参数（内参/成像模型）
                 spawn=sim_utils.PinholeCameraCfg(
@@ -590,8 +633,153 @@ class SimIsaacModel:
         self._robot.reset()
         self._target_pos = self._robot.data.default_joint_pos.clone()
 
+        # 删除场景中添加的随机物体
+        self.remove_random_object()
+        
+        
+    def grasp_open(self):
+        """打开夹爪"""
+        self._target_pos[0, 5] = GRIPPER_OPEN
+        self._robot.set_joint_position_target(self._target_pos)
+
+    def close_gripper(self):
+        """关闭夹爪"""
+        self._target_pos[0, 5] = GRIPPER_CLOSED
+        self._robot.set_joint_position_target(self._target_pos)
+
+    def gripper_state(self)->float:
+        """返回夹爪电机的角度"""
+        return self._robot.data.joint_pos[0, 5].cpu().item()
+
+    def is_grasping(self, threshold=0.02)->bool:
+        """根据夹爪当前状态判断是否正在夹持物体，threshold 是夹爪闭合的角度阈值（弧度）"""
+        gripper_angle = self.gripper_state()
+        # If gripper is more closed than threshold from fully open, consider it grasping
+        return abs(gripper_angle - GRIPPER_OPEN) > threshold
+    
+    def randomize_object(self, position=None)->dict:
+        """在场景中的地面上随机(指定范围内)/指定位置添加一个物体，返回物体的坐标
+         使用场景中已有的 cube 对象并随机化其位置
+        """
+        # Get the cube from the scene
+        if "cube" not in self._scene.keys():
+            print("[Object] No cube in scene, cannot randomize")
+            return None
+
+        cube = self._scene["cube"]
+
+        # Generate random position if not specified
+        if position is None:
+            x = random.uniform(*OBJ_X_RANGE)
+            y = random.uniform(*OBJ_Y_RANGE)
+            z = OBJ_Z
+            position = (x, y, z)
+        else:
+            x, y, z = position
+
+        # Random orientation (yaw only)
+        yaw = random.uniform(0, 2 * math.pi)
+        qw = math.cos(yaw / 2)
+        qx, qy = 0.0, 0.0
+        qz = math.sin(yaw / 2)
+
+        # Write to simulation
+        pose = torch.tensor([[x, y, z, qw, qx, qy, qz]], dtype=torch.float32, device=cube.device)
+        pose[:, :3] += self._scene.env_origins
+        cube.write_root_pose_to_sim(pose)
+
+        # Clear velocity to prevent residual motion
+        zero_vel = torch.zeros((1, 6), dtype=torch.float32, device=cube.device)
+        cube.write_root_velocity_to_sim(zero_vel)
+
+        print(f"[Object] Randomized cube at ({x:.3f}, {y:.3f}, {z:.3f})")
+
+        return {
+            'name': 'cube',
+            'position': position,
+            'orientation': (qw, qx, qy, qz),
+        }
+
+    def remove_random_object(self):
+        """移除之前添加的随机物体"""
+        if not self._random_objects:
+            print("[Object] No random objects to remove")
+            return
+
+        stage = get_current_stage()
+        for obj_info in self._random_objects:
+            prim_path = obj_info['prim_path']
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim.IsValid():
+                stage.RemovePrim(prim_path)
+                print(f"[Object] Removed: {obj_info['name']}")
+
+        self._random_objects.clear()
+
+    def add_object(self, name, position, size=0.03, color=(0.8, 0.1, 0.1)):
+        """添加一个物体到场景中，返回物体的坐标等信息"""
+        x, y, z = position
+
+        # Random orientation (yaw only)
+        yaw = random.uniform(0, 2 * math.pi)
+        qw = math.cos(yaw / 2)
+        qx, qy = 0.0, 0.0
+        qz = math.sin(yaw / 2)
+
+        prim_path = f"/World/envs/env_0/{name}"
+
+        # Create object configuration
+        obj_cfg = RigidObjectCfg(
+            prim_path=prim_path,
+            spawn=sim_utils.CuboidCfg(
+                size=(size, size, size),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=(x, y, z),
+                rot=(qw, qx, qy, qz),
+            ),
+        )
+
+        # Spawn the object
+        obj_cfg.spawn.func(prim_path, obj_cfg.spawn, translation=(x, y, z), orientation=(qw, qx, qy, qz))
+
+        print(f"[Object] Added: {name} at ({x:.3f}, {y:.3f}, {z:.3f})")
+
+        return {
+            'name': name,
+            'prim_path': prim_path,
+            'position': position,
+            'size': size,
+            'orientation': (qw, qx, qy, qz),
+        }
+
+    def del_object(self, name):
+        """删除场景中的物体"""
+        prim_path = f"/World/envs/env_0/{name}"
+        stage = get_current_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if prim.IsValid():
+            stage.RemovePrim(prim_path)
+            print(f"[Object] Deleted: {name}")
+            return True
+        else:
+            print(f"[Object] Not found: {name}")
+            return False
+    
+    def get_cube(self):
+        """获取场景中的 cube 对象"""
+        if "cube" in self._scene.keys():
+            return self._scene["cube"]
+        return None
+
     def close(self):
-        pass
+        """清理资源"""
+        print("[INFO]: Closing SimIsaacModel and cleaning up resources.")
+        self.remove_random_object()
 
 
 # =============================================================================
@@ -765,32 +953,211 @@ def data_produce():
         5. Check grasp success
         6. Save episode file
     """
-    num_episodes=2
+    num_episodes = 2
     output_dir = "datasets/grasp_v1"
-    
-    args_cli.num_episodes = num_episodes
-    args_cli.output_dir = output_dir
-    args_cli.device = "cuda:0"  # or "cpu"
-    
-    # sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
-    # sim = sim_utils.SimulationContext(sim_cfg)
-    # sim.set_camera_view([0.5, 0.5, 0.5], [0.0, 0.0, 0.15])
-    # scene_cfg = GraspSceneCfg(num_envs=1, env_spacing=2.0)
-    # scene = InteractiveScene(scene_cfg)
-    # sim.reset()
-    
-    print("[INFO]: Scene setup complete.")
-    print(f"[INFO]: Generating {args_cli.num_episodes} episodes → {args_cli.output_dir}")
-    
-    run_data_generation(sim, scene)
-    
-    pass
+
+    # 创建仿真器实例，加载 URDF 模型
+    sim = SimIsaacModel(URDF_PATH)
+
+    # 获取相机传感器
+    camera_gripper: Camera = sim._scene["gripper_cam"]
+
+    # 创建输出目录
+    os.makedirs(output_dir, exist_ok=True)
+
+    success_count = 0
+
+    print(f"\n[INFO]: Starting data generation: {num_episodes} episodes → {output_dir}")
+
+    for ep_idx in range(num_episodes):
+        print(f"\n[Episode {ep_idx + 1}/{num_episodes}]")
+
+        # 1. Reset robot to home position
+        sim.reset()
+        sim.grasp_open()
+
+        # Settle the scene
+        for _ in range(5):
+            sim.step()
+
+        # 2. Randomize object position
+        obj_info = sim.randomize_object()
+        object_pos = obj_info['position']
+
+        # Settle after object spawn
+        for _ in range(5):
+            sim.step()
+
+        # 3. Create HDF5 file for this episode
+        filepath = os.path.join(output_dir, f"episode_{ep_idx:06d}.hdf5")
+        f = h5py.File(filepath, "w")
+
+        max_steps = STEPS_PER_PHASE * 7
+        f.create_dataset("action", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32")
+        f.create_dataset("observation/images/gripper", shape=(0, CAM_HEIGHT, CAM_WIDTH, 3),
+                         maxshape=(max_steps, CAM_HEIGHT, CAM_WIDTH, 3), dtype="uint8")
+        f.create_dataset("observation/state", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32")
+        f.create_dataset("observation/gripper", shape=(0, 1), maxshape=(max_steps, 1), dtype="float32")
+        f.create_dataset("object_pos", shape=(0, 3), maxshape=(max_steps, 3), dtype="float32")
+
+        f.attrs["fps"] = 30
+        f.attrs["sim_dt"] = sim._sim_dt
+        f.attrs["success"] = False
+
+        try:
+            # 4. Plan grasp trajectory
+            phases = plan_grasp_trajectory(sim, object_pos, PLACE_POS)
+
+            # 5. Execute trajectory and record data
+            for phase in phases:
+                print(f"  Phase: {phase['name']}")
+                for waypoint in phase["waypoints"]:
+                    # Set joint targets
+                    target = torch.tensor(waypoint, dtype=torch.float32, device=sim._sim.device)
+                    target[5] = phase["gripper"]
+
+                    sim._target_pos[0] = target
+                    sim.step()
+
+                    # Record step data
+                    record_step(f, sim, camera_gripper, target, phase["gripper"])
+
+            # 6. Check grasp success
+            success = check_grasp_success(sim, PLACE_POS)
+
+        except Exception as exc:
+            print(f"  [Episode {ep_idx + 1}] aborted: {exc}")
+            success = False
+        finally:
+            f.attrs["success"] = success
+            f.attrs["num_steps"] = f["action"].shape[0]
+            f.close()
+
+        if success:
+            success_count += 1
+        print(f"  Result: {'SUCCESS' if success else 'FAIL'} ({success_count}/{ep_idx + 1})")
+
+        if not simulation_app.is_running():
+            break
+
+    print(f"\n{'=' * 50}")
+    print(f"Data generation complete: {num_episodes} episodes")
+    print(f"Success rate: {success_count}/{num_episodes}")
+    print(f"Output: {output_dir}")
+
+    sim.close()
+
+
+def plan_grasp_trajectory(sim: SimIsaacModel, object_pos: tuple, place_pos: tuple) -> list[dict]:
+    """Plan a full pick-and-place trajectory as a sequence of phases."""
+    phases = []
+
+    grasp_height = max(object_pos[2], OBJ_Z)
+    place_height = max(place_pos[2], OBJ_Z)
+
+    # Phase 1: Approach (move to pre-grasp position)
+    pre_grasp_pos = (object_pos[0], object_pos[1], grasp_height + PRE_GRASP_HEIGHT_OFFSET)
+    pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, steps=STEPS_PER_PHASE)
+    phases.append({
+        "name": "approach",
+        "waypoints": pre_grasp_traj,
+        "gripper": GRIPPER_OPEN,
+    })
+
+    # Phase 2: Descend to grasp position
+    grasp_pos = (object_pos[0], object_pos[1], grasp_height)
+    grasp_traj = sim.isaac_ik_trace(grasp_pos, steps=STEPS_PER_PHASE)
+    phases.append({
+        "name": "descend",
+        "waypoints": grasp_traj,
+        "gripper": GRIPPER_OPEN,
+    })
+
+    # Phase 3: Close gripper
+    current_joints = sim.get_joint_angles()
+    phases.append({
+        "name": "close_gripper",
+        "waypoints": [current_joints for _ in range(STEPS_PER_PHASE)],
+        "gripper": GRIPPER_CLOSED,
+    })
+
+    # Phase 4: Lift
+    lift_pos = (object_pos[0], object_pos[1], max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
+    lift_traj = sim.isaac_ik_trace(lift_pos, steps=STEPS_PER_PHASE)
+    phases.append({
+        "name": "lift",
+        "waypoints": lift_traj,
+        "gripper": GRIPPER_CLOSED,
+    })
+
+    # Phase 5: Move to place position
+    pre_place_pos = (place_pos[0], place_pos[1], max(LIFT_HEIGHT, place_height + PRE_GRASP_HEIGHT_OFFSET))
+    move_traj = sim.isaac_ik_trace(pre_place_pos, steps=STEPS_PER_PHASE)
+    phases.append({
+        "name": "move_to_place",
+        "waypoints": move_traj,
+        "gripper": GRIPPER_CLOSED,
+    })
+
+    # Phase 6: Descend to place
+    place_traj = sim.isaac_ik_trace((place_pos[0], place_pos[1], place_height), steps=STEPS_PER_PHASE)
+    phases.append({
+        "name": "place_descend",
+        "waypoints": place_traj,
+        "gripper": GRIPPER_CLOSED,
+    })
+
+    # Phase 7: Release gripper
+    current_joints = sim.get_joint_angles()
+    phases.append({
+        "name": "release",
+        "waypoints": [current_joints for _ in range(STEPS_PER_PHASE)],
+        "gripper": GRIPPER_OPEN,
+    })
+
+    return phases
+
+
+def record_step(f: h5py.File, sim: SimIsaacModel, camera_gripper: Camera, action: torch.Tensor, gripper_val: float):
+    """Record one timestep of data into the HDF5 file."""
+    # Read current state
+    joint_state = sim._robot.data.joint_pos[0, :6].cpu().numpy()
+    gripper_state = np.array([gripper_val], dtype=np.float32)
+
+    # Get object position from scene cube
+    cube = sim._scene["cube"]
+    object_pos = cube.data.root_pos_w[0].cpu().numpy()
+
+    # Read camera image
+    gripper_rgb = camera_gripper.data.output["rgb"][0, ..., :3].cpu().numpy()
+
+    # Append to HDF5
+    for key, data in [
+        ("action", action.cpu().numpy().reshape(1, 6)),
+        ("observation/state", joint_state.reshape(1, 6)),
+        ("observation/gripper", gripper_state.reshape(1, 1)),
+        ("observation/images/gripper", gripper_rgb[np.newaxis]),
+        ("object_pos", object_pos.reshape(1, 3)),
+    ]:
+        ds = f[key]
+        ds.resize(ds.shape[0] + 1, axis=0)
+        ds[-1] = data
+
+
+def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float = 0.05) -> bool:
+    """Check if the object was successfully placed near the target position."""
+    cube = sim._scene["cube"]
+    obj_pos = cube.data.root_pos_w[0].cpu().numpy()
+    place_pos_np = np.array(place_pos, dtype=np.float32)
+    distance = np.linalg.norm(obj_pos - place_pos_np)
+
+    return bool(distance < threshold and obj_pos[2] >= OBJ_Z * 0.8)
     
 
 if __name__ == "__main__":
     # demo_control()
     data_produce()
-
+    simulation_app.close()
 
 # 最后关闭
 simulation_app.close()

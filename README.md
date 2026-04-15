@@ -169,3 +169,5 @@ TODO:加 UI 窗口 实现切换视角，加 臂上相机，
 
 @data_produce_init.py 参考初版设计方案 @isaac_koch.py 参考SimIsaacModel 接口及其定义，完善mian函数，使用isaac_koch中定义的相关接口函数，注意保留原来的注释，生成SimIsaacProduce管理环境中其他物体如方块等物体,仅修改data_produce.py文件，不修改isaac_koch中内容
 
+
+出现问题，No random objects to remove

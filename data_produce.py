@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import os
+from dataclasses import dataclass
 
 from isaaclab.app import AppLauncher
 
@@ -35,9 +36,12 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.assets.articulation import Articulation, ArticulationCfg
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg, Camera
 from isaaclab.utils import configclass
+from isaaclab.utils.math import subtract_frame_transforms
 
 
 # =============================================================================
@@ -191,114 +195,75 @@ class GraspSceneCfg(InteractiveSceneCfg):
 
 
 # =============================================================================
-# Section 4: Forward Kinematics & Inverse Kinematics
+# Section 4: Inverse Kinematics
 # =============================================================================
 
-# Koch arm joint configuration from URDF:
-#   (translation_xyz, rotation_axis, axis_sign)
-_JOINT_CHAIN = [
-    ((0.0, 0.0, 0.039),              'z',  1),   # joint1: base yaw
-    ((-0.0002, 0.0, 0.0173),         'x', -1),   # joint2: shoulder pitch
-    ((0.00025, 0.014791, 0.108347),   'x',  1),   # joint3: elbow pitch
-    ((0.000125, 0.090467, 0.002747),  'x',  1),   # joint4: wrist pitch
-    ((0.001353, 0.000007, -0.045),    'z', -1),   # joint5: wrist roll
-    ((-0.0074, -0.00025, -0.01315),   'y', -1),   # joint_gripper
-]
+@dataclass
+class IKContext:
+    controller: DifferentialIKController
+    robot_entity_cfg: SceneEntityCfg
+    ee_jacobi_idx: int
 
 
-def _make_transform(tx: float, ty: float, tz: float, axis: str, angle: float) -> torch.Tensor:
-    """Build a 4x4 homogeneous matrix: Translation(tx,ty,tz) @ Rotation(axis, angle)."""
-    c, s = math.cos(angle), math.sin(angle)
-    T = torch.eye(4, dtype=torch.float32)
-    T[0, 3], T[1, 3], T[2, 3] = tx, ty, tz
-    if axis == 'x':
-        T[1, 1], T[1, 2] = c, -s
-        T[2, 1], T[2, 2] = s,  c
-    elif axis == 'y':
-        T[0, 0], T[0, 2] =  c, s
-        T[2, 0], T[2, 2] = -s, c
-    else:  # z
-        T[0, 0], T[0, 1] = c, -s
-        T[1, 0], T[1, 1] = s,  c
-    return T
-
-
-def forward_kinematics(joint_angles, up_to_joint: int = 5) -> torch.Tensor:
-    """Compute end-effector pose via forward kinematics.
-
-    Args:
-        joint_angles: Sequence of 6 joint angles [q1..q5, q_gripper].
-        up_to_joint: Number of joints to chain (1-6). Default 5 gives
-                     gripper_static frame (ignoring gripper open/close).
-
-    Returns:
-        T: (4, 4) homogeneous transform of the end-effector in base frame.
-           Position = T[:3, 3], rotation = T[:3, :3].
-    """
-    T = torch.eye(4, dtype=torch.float32)
-    for i in range(min(up_to_joint, 6)):
-        (tx, ty, tz), axis, sign = _JOINT_CHAIN[i]
-        q = float(joint_angles[i])
-        T = T @ _make_transform(tx, ty, tz, axis, sign * q)
-    return T
+def create_ik_context(scene: InteractiveScene, robot: Articulation) -> IKContext:
+    """Create reusable Differential IK state for the Koch arm."""
+    diff_ik_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
+    controller = DifferentialIKController(
+        diff_ik_cfg,
+        num_envs=int(scene.env_origins.shape[0]),
+        device=robot.device,
+    )
+    robot_entity_cfg = SceneEntityCfg("koch", joint_names=["joint[1-5]"], body_names=["gripper_static_1"])
+    robot_entity_cfg.resolve(scene)
+    return IKContext(
+        controller=controller,
+        robot_entity_cfg=robot_entity_cfg,
+        ee_jacobi_idx=robot_entity_cfg.body_ids[0] - 1,
+    )
 
 
 def solve_ik(
     robot: Articulation,
+    ik_context: IKContext,
     target_pos_world: tuple,
     target_orient: tuple | None = None,
-    max_iter: int = 200,
-    tol: float = 0.001,
-    damping: float = 0.01,
-    lr: float = 0.5,
 ) -> torch.Tensor:
-    """Solve IK using numerical Jacobian with damped least squares.
+    """Solve IK with Isaac Lab DifferentialIKController and return full joint targets."""
+    target_pos_w = torch.as_tensor(target_pos_world, dtype=torch.float32, device=robot.device).reshape(1, 3)
+    target_pos_w[:, 2] = torch.clamp(target_pos_w[:, 2], min=OBJ_Z)
 
-    Iteratively adjusts arm joints (0-4) to move the end-effector toward
-    the target position. Gripper joint (index 5) is left unchanged.
+    ee_pos_w = robot.data.body_pos_w[:, ik_context.robot_entity_cfg.body_ids[0]]
+    ee_quat_w = robot.data.body_quat_w[:, ik_context.robot_entity_cfg.body_ids[0]]
+    root_pos_w = robot.data.root_pos_w
+    root_quat_w = robot.data.root_quat_w
 
-    Args:
-        robot: The Koch Articulation instance.
-        target_pos_world: (x, y, z) desired end-effector position.
-        target_orient: (qw, qx, qy, qz) desired orientation (unused for now).
-        max_iter: Maximum solver iterations.
-        tol: Convergence tolerance in meters.
-        damping: Damped least squares regularization factor.
-        lr: Step size for joint updates.
+    if target_orient is None:
+        target_quat_w = ee_quat_w.clone()
+    else:
+        target_quat_w = torch.as_tensor(target_orient, dtype=torch.float32, device=robot.device).reshape(1, 4)
+        quat_norm = torch.linalg.norm(target_quat_w, dim=1, keepdim=True)
+        if torch.any(quat_norm < 1e-8):
+            raise ValueError("Target quaternion norm must be non-zero.")
+        target_quat_w = target_quat_w / quat_norm
 
-    Returns:
-        joint_positions: (num_joints,) tensor of target joint angles.
-    """
-    q = robot.data.default_joint_pos[0].clone().cpu().float()
-    target = torch.tensor(target_pos_world, dtype=torch.float32)
-    num_arm_joints = 5  # joints 0-4, skip gripper
-    eps = 1e-4
+    ee_pos_b, ee_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
+    target_pos_b, target_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, target_pos_w, target_quat_w)
 
-    for iteration in range(max_iter):
-        T = forward_kinematics(q, up_to_joint=5)
-        ee_pos = T[:3, 3]
-        error = target - ee_pos
+    ik_command = torch.cat((target_pos_b, target_quat_b), dim=1)
+    ik_context.controller.reset()
+    ik_context.controller.set_command(ik_command)
 
-        if error.norm().item() < tol:
-            break
+    jacobian = robot.root_physx_view.get_jacobians()[
+        :, ik_context.ee_jacobi_idx, :, ik_context.robot_entity_cfg.joint_ids
+    ]
+    joint_pos = robot.data.joint_pos[:, ik_context.robot_entity_cfg.joint_ids]
+    joint_pos_des = ik_context.controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
-        # Numerical Jacobian (3 x 5)
-        J = torch.zeros(3, num_arm_joints)
-        for j in range(num_arm_joints):
-            q_pert = q.clone()
-            q_pert[j] += eps
-            T_pert = forward_kinematics(q_pert, up_to_joint=5)
-            J[:, j] = (T_pert[:3, 3] - ee_pos) / eps
-
-        # Damped least squares: dq = J^T (J J^T + λI)^{-1} error
-        JJT = J @ J.T + damping * torch.eye(3)
-        dq = J.T @ torch.linalg.solve(JJT, error)
-        q[:num_arm_joints] += lr * dq
-
-    if error.norm().item() >= tol:
-        print(f"  [IK] Warning: did not converge, residual={error.norm().item():.4f}m")
-
-    return q.to(robot.device)
+    target_joint_pos = robot.data.joint_pos[0].clone()
+    target_joint_pos[ik_context.robot_entity_cfg.joint_ids] = joint_pos_des[0]
+    if not torch.isfinite(target_joint_pos).all():
+        raise RuntimeError("IK produced non-finite joint targets.")
+    return target_joint_pos
 
 
 # =============================================================================
@@ -327,79 +292,62 @@ def interpolate_joints(start: torch.Tensor, end: torch.Tensor, steps: int) -> li
 
 def plan_grasp_trajectory(
     robot: Articulation,
+    ik_context: IKContext,
     object_pos: tuple,
     place_pos: tuple,
 ) -> list[dict]:
-    """Plan a full pick-and-place trajectory as a sequence of phases.
-
-    Args:
-        robot: The Koch Articulation instance.
-        object_pos: (x, y, z) world position of the object center.
-        place_pos: (x, y, z) world position of the place target.
-
-    Returns:
-        List of phase dicts, each containing:
-            - "name": str, phase name for logging
-            - "waypoints": list of (num_joints,) tensors
-            - "gripper": float, gripper target for this phase
-
-    TODO: 实现完整轨迹规划, 以下为各阶段伪代码
-    """
+    """Plan a full pick-and-place trajectory as a sequence of phases."""
     phases = []
     home_joints = robot.data.default_joint_pos[0].clone()
 
-    # --- Phase 1: Home → Pre-grasp (above object) ---
-    pre_grasp_pos = (object_pos[0], object_pos[1], object_pos[2] + PRE_GRASP_HEIGHT_OFFSET)
-    pre_grasp_joints = solve_ik(robot, pre_grasp_pos)
+    grasp_height = max(object_pos[2], OBJ_Z)
+    place_height = max(place_pos[2], OBJ_Z)
+
+    pre_grasp_pos = (object_pos[0], object_pos[1], grasp_height + PRE_GRASP_HEIGHT_OFFSET)
+    pre_grasp_joints = solve_ik(robot, ik_context, pre_grasp_pos)
     phases.append({
         "name": "approach",
         "waypoints": interpolate_joints(home_joints, pre_grasp_joints, STEPS_PER_PHASE),
         "gripper": GRIPPER_OPEN,
     })
 
-    # --- Phase 2: Pre-grasp → Grasp (descend to object) ---
-    grasp_pos = (object_pos[0], object_pos[1], object_pos[2])
-    grasp_joints = solve_ik(robot, grasp_pos)
+    grasp_pos = (object_pos[0], object_pos[1], grasp_height)
+    grasp_joints = solve_ik(robot, ik_context, grasp_pos)
     phases.append({
         "name": "descend",
         "waypoints": interpolate_joints(pre_grasp_joints, grasp_joints, STEPS_PER_PHASE),
         "gripper": GRIPPER_OPEN,
     })
 
-    # --- Phase 3: Close gripper ---
     phases.append({
         "name": "close_gripper",
         "waypoints": [grasp_joints.clone() for _ in range(STEPS_PER_PHASE)],
         "gripper": GRIPPER_CLOSED,
     })
 
-    # --- Phase 4: Lift object ---
-    lift_pos = (object_pos[0], object_pos[1], LIFT_HEIGHT)
-    lift_joints = solve_ik(robot, lift_pos)
+    lift_pos = (object_pos[0], object_pos[1], max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
+    lift_joints = solve_ik(robot, ik_context, lift_pos)
     phases.append({
         "name": "lift",
         "waypoints": interpolate_joints(grasp_joints, lift_joints, STEPS_PER_PHASE),
         "gripper": GRIPPER_CLOSED,
     })
 
-    # --- Phase 5: Move to place position ---
-    pre_place_pos = (place_pos[0], place_pos[1], LIFT_HEIGHT)
-    pre_place_joints = solve_ik(robot, pre_place_pos)
+    pre_place_pos = (place_pos[0], place_pos[1], max(LIFT_HEIGHT, place_height + PRE_GRASP_HEIGHT_OFFSET))
+    pre_place_joints = solve_ik(robot, ik_context, pre_place_pos)
     phases.append({
         "name": "move_to_place",
         "waypoints": interpolate_joints(lift_joints, pre_place_joints, STEPS_PER_PHASE),
         "gripper": GRIPPER_CLOSED,
     })
 
-    # --- Phase 6: Descend to place ---
-    place_joints = solve_ik(robot, place_pos)
+    place_joints = solve_ik(robot, ik_context, (place_pos[0], place_pos[1], place_height))
     phases.append({
         "name": "place_descend",
         "waypoints": interpolate_joints(pre_place_joints, place_joints, STEPS_PER_PHASE),
         "gripper": GRIPPER_CLOSED,
     })
 
-    # --- Phase 7: Open gripper (release) ---
     phases.append({
         "name": "release",
         "waypoints": [place_joints.clone() for _ in range(STEPS_PER_PHASE)],
@@ -452,29 +400,8 @@ def randomize_object(cube, env_origins: torch.Tensor) -> tuple:
 # Section 7: Data Recording
 # =============================================================================
 
-def create_episode_file(output_dir: str, episode_idx: int) -> h5py.File:
-    """Create an HDF5 file for one episode.
-
-    Args:
-        output_dir: Base output directory.
-        episode_idx: Episode index number.
-
-    Returns:
-        Open h5py.File handle with pre-created datasets.
-
-    File structure:
-        episode_XXXXXX.hdf5
-        ├── action                    (T, 6)   float32  - target joint positions
-        ├── observation/
-        │   ├── images/
-        │   │   ├── top               (T, 480, 640, 3) uint8
-        │   │   └── wrist             (T, 480, 640, 3) uint8
-        │   ├── state                 (T, 6)   float32  - current joint positions
-        │   └── gripper               (T, 1)   float32  - gripper state
-        ├── object_pos                (T, 3)   float32  - object world position
-        └── attrs:
-              fps, sim_dt, success, num_steps
-    """
+def create_episode_file(output_dir: str, episode_idx: int, sim_dt: float) -> h5py.File:
+    """Create an HDF5 file for one episode."""
     os.makedirs(output_dir, exist_ok=True)
     filepath = os.path.join(output_dir, f"episode_{episode_idx:06d}.hdf5")
     f = h5py.File(filepath, "w")
@@ -488,6 +415,7 @@ def create_episode_file(output_dir: str, episode_idx: int) -> h5py.File:
     f.create_dataset("object_pos",                 shape=(0, 3), maxshape=(max_steps, 3), dtype="float32")
 
     f.attrs["fps"] = RECORD_FPS
+    f.attrs["sim_dt"] = sim_dt
     f.attrs["success"] = False
     return f
 
@@ -542,21 +470,19 @@ def record_step(
 # =============================================================================
 
 def check_grasp_success(cube, place_pos: tuple, threshold: float = 0.05) -> bool:
-    """Check if the object was successfully placed near the target position.
-
-    Args:
-        cube: Target object rigid body.
-        place_pos: (x, y, z) intended place position.
-        threshold: Maximum distance (meters) to count as success.
-
-    Returns:
-        True if object is within threshold of place_pos.
-
-    TODO: 实现成功检测
-    """
+    """Check if the object was successfully placed near the target position."""
     cube_pos = cube.data.root_pos_w[0].cpu().numpy()
-    distance = np.linalg.norm(cube_pos - np.array(place_pos))
-    return bool(distance < threshold)
+    place_pos_np = np.array(place_pos, dtype=np.float32)
+    distance = np.linalg.norm(cube_pos - place_pos_np)
+    return bool(distance < threshold and cube_pos[2] >= OBJ_Z * 0.8)
+
+
+def settle_scene(sim: sim_utils.SimulationContext, scene: InteractiveScene, steps: int = 5):
+    """Advance the simulation for a few steps so assets and sensors settle."""
+    sim_dt = sim.get_physics_dt()
+    for _ in range(max(steps, 1)):
+        sim.step()
+        scene.update(sim_dt)
 
 
 # =============================================================================
@@ -564,29 +490,13 @@ def check_grasp_success(cube, place_pos: tuple, threshold: float = 0.05) -> bool
 # =============================================================================
 
 def run_data_generation(sim: sim_utils.SimulationContext, scene: InteractiveScene):
-    """Main loop: iterate over episodes, generate trajectories, record data.
-
-    Overall flow per episode:
-        1. Reset robot to home position
-        2. Randomize object position/orientation on table
-        3. Plan grasp trajectory (IK for each waypoint)
-        4. Execute trajectory step-by-step:
-           a. Set joint position target
-           b. Step simulation
-           c. Update cameras
-           d. Record step data to HDF5
-        5. Check grasp success
-        6. Save episode file
-
-    Args:
-        sim: Isaac Sim simulation context.
-        scene: Interactive scene containing all assets and sensors.
-    """
+    """Main loop: iterate over episodes, generate trajectories, record data."""
     robot: Articulation = scene["koch"]
     cube = scene["cube"]
     camera_top: Camera = scene["camera_top"]
     camera_wrist: Camera = scene["camera_wrist"]
     sim_dt = sim.get_physics_dt()
+    ik_context = create_ik_context(scene, robot)
 
     os.makedirs(args_cli.output_dir, exist_ok=True)
 
@@ -595,7 +505,6 @@ def run_data_generation(sim: sim_utils.SimulationContext, scene: InteractiveScen
     for ep_idx in range(args_cli.num_episodes):
         print(f"\n[Episode {ep_idx + 1}/{args_cli.num_episodes}]")
 
-        # --- Step 1: Reset robot ---
         root_state = robot.data.default_root_state.clone()
         root_state[:, :3] += scene.env_origins
         robot.write_root_pose_to_sim(root_state[:, :7])
@@ -606,45 +515,42 @@ def run_data_generation(sim: sim_utils.SimulationContext, scene: InteractiveScen
         )
         robot.reset()
 
-        # --- Step 2: Randomize object ---
         object_pos = randomize_object(cube, scene.env_origins)
-        sim.step()  # let physics settle
-        scene.update(sim_dt)
+        settle_scene(sim, scene, steps=5)
 
-        # --- Step 3: Plan trajectory ---
-        phases = plan_grasp_trajectory(robot, object_pos, PLACE_POS)
+        f = create_episode_file(args_cli.output_dir, ep_idx, sim_dt)
 
-        # --- Step 4: Create episode HDF5 ---
-        f = create_episode_file(args_cli.output_dir, ep_idx)
+        try:
+            phases = plan_grasp_trajectory(robot, ik_context, object_pos, PLACE_POS)
 
-        # --- Step 5: Execute each phase ---
-        for phase in phases:
-            print(f"  Phase: {phase['name']}")
-            for waypoint in phase["waypoints"]:
-                # Build full target: arm joints + gripper
-                target = waypoint.clone()
-                target[5] = phase["gripper"]  # joint_gripper is index 5
+            for phase in phases:
+                print(f"  Phase: {phase['name']}")
+                for waypoint in phase["waypoints"]:
+                    target = waypoint.clone()
+                    target[5] = phase["gripper"]
+                    if not torch.isfinite(target).all():
+                        raise RuntimeError(f"Non-finite target generated in phase {phase['name']}")
 
-                # Set target and step
-                robot.set_joint_position_target(target.unsqueeze(0))
-                scene.write_data_to_sim()
-                sim.step()
-                scene.update(sim_dt)
+                    robot.set_joint_position_target(target.unsqueeze(0))
+                    scene.write_data_to_sim()
+                    sim.step()
+                    scene.update(sim_dt)
 
-                # Record
-                record_step(f, robot, cube, camera_top, camera_wrist, target, phase["gripper"])
+                    record_step(f, robot, cube, camera_top, camera_wrist, target, phase["gripper"])
 
-        # --- Step 6: Check success ---
-        success = check_grasp_success(cube, PLACE_POS)
-        f.attrs["success"] = success
-        f.attrs["num_steps"] = f["action"].shape[0]
-        f.close()
+            success = check_grasp_success(cube, PLACE_POS)
+        except Exception as exc:
+            print(f"  [Episode {ep_idx + 1}] aborted: {exc}")
+            success = False
+        finally:
+            f.attrs["success"] = success
+            f.attrs["num_steps"] = f["action"].shape[0]
+            f.close()
 
         if success:
             success_count += 1
         print(f"  Result: {'SUCCESS' if success else 'FAIL'} ({success_count}/{ep_idx + 1})")
 
-        # --- Early exit if sim closed ---
         if not simulation_app.is_running():
             break
 
@@ -659,13 +565,6 @@ def run_data_generation(sim: sim_utils.SimulationContext, scene: InteractiveScen
 # =============================================================================
 
 def main():
-    num_episodes=2
-    output_dir = "datasets/grasp_v1"
-    
-    args_cli.num_episodes = num_episodes
-    args_cli.output_dir = output_dir
-    args_cli.device = "cuda:0"  # or "cpu"
-    
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
 
     sim = sim_utils.SimulationContext(sim_cfg)
@@ -675,6 +574,7 @@ def main():
     scene = InteractiveScene(scene_cfg)
 
     sim.reset()
+    settle_scene(sim, scene, steps=2)
     print("[INFO]: Scene setup complete.")
     print(f"[INFO]: Generating {args_cli.num_episodes} episodes → {args_cli.output_dir}")
 
