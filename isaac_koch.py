@@ -39,6 +39,9 @@ from isaaclab.sensors import CameraCfg, Camera
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, subtract_frame_transforms
 from isaaclab.sim.utils.stage import get_current_stage
+from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
+
+
 import h5py
 import random
 
@@ -47,16 +50,22 @@ import random
 URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urdf", "koch.urdf")
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint_gripper"]
 ANGLE_STEP = 0.05  # 每次按键旋转弧度 (~2.9°)
+NUM_EXPISODES = 5
 
 # Object randomization ranges (from data_produce.py)
 OBJ_X_RANGE = (-0.05, 0.05)   # left-right (narrow, centered)
-OBJ_Y_RANGE = (0.10, 0.25)    # forward from robot base
+OBJ_Y_RANGE = (0.10, 0.15)    # forward from robot base
 OBJ_Z = 0.015                 # half cube size, sitting on ground
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
+OBJ_L = 0.02
+OBJ_W = 0.02
+OBJ_H = 0.02
+
 # Gripper joint values
-GRIPPER_OPEN = 0.0
-GRIPPER_CLOSED = -0.6
+GRIPPER_OPEN = -1.0
+GRIPPER_GRASP = -0.075
+GRIPPER_CLOSED = 0.0
 
 # Trajectory interpolation
 STEPS_PER_PHASE = 30
@@ -64,12 +73,16 @@ STEPS_PER_PHASE = 30
 # Camera resolution
 CAM_WIDTH = 640
 CAM_HEIGHT = 480
+CAM_POS = (0.0, 0.2, 0.0)
+CAM_ROT = (0.766, -0.643, 0, 0) # 四元数 (w, x, y, z)，测试为正好看到夹爪 (x:-80,y:0,z:0)
+
 
 # Place target
 PLACE_POS = (0.05, 0.15, 0.05)
 
 # Grasp approach parameters
-PRE_GRASP_HEIGHT_OFFSET = 0.08
+PRE_GRASP_HEIGHT_OFFSET = 0.1
+PRE_GRASP_HEIGHT_OFFSET = 0.06
 LIFT_HEIGHT = 0.15
 
 # Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
@@ -217,14 +230,40 @@ class SimIsaacModel:
             )
             koch = self.KOCH_CFG.replace(prim_path="{ENV_REGEX_NS}/Koch")
 
-            # Target object (dynamic cuboid, will be randomized)
+            # Target object (dynamic cuboid, will be randomized) 
+            # 添加一个物体 摩檫力增大 变成柔体
             cube = RigidObjectCfg(
                 prim_path="{ENV_REGEX_NS}/Cube",
                 spawn=sim_utils.CuboidCfg(
-                    size=(0.03, 0.03, 0.03),
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-                    mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    size=(OBJ_L, OBJ_W, OBJ_H),  # 立方体尺寸
+                    # 刚体属性配置
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                        linear_damping=1.0,      # 线性阻尼：减少平移运动的晃动
+                        angular_damping=1.0,     # 角阻尼：减少旋转运动的晃动
+                        max_linear_velocity=1.0, # 最大线速度限制 (m/s)
+                        max_angular_velocity=57.3, # 最大角速度限制 (deg/s) ≈ 1 rad/s
+                        disable_gravity=False,   # 启用重力
+                    ),
+                    # 质量属性配置
+                    mass_props=sim_utils.MassPropertiesCfg(
+                        mass=0.02,               # 质量 0.02kg，适当的质量提高稳定性
+                    ),
+                    # 碰撞属性配置 - 关键参数用于提高抓取成功率
+                    collision_props=sim_utils.CollisionPropertiesCfg(
+                        contact_offset=0.002,    # 接触偏移 (m)：碰撞检测开始的距离
+                        rest_offset=0.0,         # 静止偏移 (m)：物体静止时的间隙，0表示紧密接触
+                        torsional_patch_radius=0.01,  # 扭转摩擦接触半径 (m)
+                        min_torsional_patch_radius=0.005, # 最小扭转摩擦半径 (m)
+                    ),
+                    # 物理材质属性 - 高摩擦低弹性，便于抓取
+                    physics_material=sim_utils.RigidBodyMaterialCfg(
+                        static_friction=100,     # 静摩擦系数：物体静止时的摩擦力，越大越不易滑动
+                        dynamic_friction=1.0,    # 动摩擦系数：物体运动时的摩擦力
+                        restitution=0,         # 弹性系数：0表示完全非弹性碰撞（不反弹）
+                        friction_combine_mode="multiply",  # 摩擦力组合模式：multiply表示相乘
+                        restitution_combine_mode="min",    # 弹性组合模式：min表示取最小值
+                    ),
+                    # 视觉材质
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
                 ),
                 init_state=RigidObjectCfg.InitialStateCfg(
@@ -253,13 +292,23 @@ class SimIsaacModel:
                 ),
                 # 相机相对父体的位姿偏移
                 offset=CameraCfg.OffsetCfg(
-                    pos=(0.0, 0.2, 0.0), # 平移偏移（x, y, z），单位为场景距离（通常米）
+                    pos=CAM_POS, # 平移偏移（x, y, z），单位为场景距离（通常米）
                     # 旋转偏移：四元数 (w, x, y, z)
                     # 注意：四元数方向和符号需要与场景其他部分一致（此处来源于 MuJoCo->Isaac 的映射）
-                    rot=(0.766, -0.643, 0, 0), # 测试为正好看到夹爪 (x:-80,y:0,z:0)
+                    rot=CAM_ROT, # 测试为正好看到夹爪 (x:-80,y:0,z:0)
                     convention="opengl", # 偏移的解释约定，例如 "world" 表示以世界/绝对参照解释，
                 ),
             )
+
+            # 1) 创建材质配置（调整这两个值改变摩擦）
+            GRIPPER_mat_cfg = RigidBodyMaterialCfg(
+                static_friction=5.0,
+                dynamic_friction=1.0,
+                friction_combine_mode="multiply"
+            )
+            # /Koch/gripper_static_1 和 /Koch/gripper_moving_1 都使用同一个材质配置
+            
+
 
         self._scene_cfg_class = _SceneCfg
 
@@ -603,8 +652,17 @@ class SimIsaacModel:
         """
         steps = max(int(steps), 1)
         device = self._sim.device
+        
+        if quat is None and pos is None:
+            # raise ValueError("At least one of pos or quat must be provided for IK target.")
+            return None
+        
+        if pos is None:
+            # 保持当前位置不发生改变
+            target_pos_w = self._robot.data.body_pos_w[:, self._robot_entity_cfg.body_ids[0]]
+        else :
+            target_pos_w = torch.as_tensor(pos, dtype=torch.float32, device=device).reshape(1, 3)
 
-        target_pos_w = torch.as_tensor(pos, dtype=torch.float32, device=device).reshape(1, 3)
 
         ee_pos_w = self._robot.data.body_pos_w[:, self._robot_entity_cfg.body_ids[0]]
         ee_quat_w = self._robot.data.body_quat_w[:, self._robot_entity_cfg.body_ids[0]]
@@ -745,7 +803,20 @@ class SimIsaacModel:
         gripper_angle = self.gripper_state()
         # If gripper is more closed than threshold from fully open, consider it grasping
         return abs(gripper_angle - GRIPPER_OPEN) > threshold
-    
+
+    def get_object_position(self)->np.ndarray:
+        """获取场景中物体的当前位置
+
+        Returns:
+            np.ndarray: 物体的3D位置 [x, y, z]，如果场景中没有物体则返回None
+        """
+        if "cube" not in self._scene.keys():
+            print("[Object] No cube in scene")
+            return None
+
+        cube = self._scene["cube"]
+        return cube.data.root_pos_w[0].cpu().numpy()
+
     def randomize_object(self, position=None)->dict:
         """在场景中的地面上随机(指定范围内)/指定位置添加一个物体，返回物体的坐标
          使用场景中已有的 cube 对象并随机化其位置
@@ -1042,7 +1113,7 @@ def data_produce():
         5. Check grasp success
         6. Save episode file
     """
-    num_episodes = 2
+    num_episodes = NUM_EXPISODES
     output_dir = "datasets/grasp_v1"
 
     # 创建仿真器实例，加载 URDF 模型
@@ -1094,24 +1165,40 @@ def data_produce():
         f.attrs["success"] = False
 
         try:
-            # 4. Plan grasp trajectory
-            phases = plan_grasp_trajectory(sim, object_pos, PLACE_POS)
+            # Store initial object position for grasp detection
+            initial_obj_pos = np.array(object_pos, dtype=np.float32)
 
-            # 5. Execute trajectory and record data
-            for phase in phases:
-                print(f"  Phase: {phase['name']}")
-                for waypoint in phase["waypoints"]:
-                    # Set joint targets
-                    target = torch.tensor(waypoint, dtype=torch.float32, device=sim._sim.device)
-                    target[5] = phase["gripper"]
+            # 4.5. plan and execute
+            fin_flag = False
+            missions = ["move_up", "move_down", "grasp_close", "lift_up", "move_home"]
+            while not fin_flag:
+                # 遍历 missions 列表
+                for mission in missions:
+                    print(f"  mission: {mission}")
+                    phases = plan_grasp_trajectory(sim, mission, object_pos, PLACE_POS)
+                    # 5. Execute trajectory and record data
+                    for phase in phases:
+                        print(f"  Phase: {phase['name']}")
+                        for waypoint in phase["waypoints"]:
+                            # Set joint targets
+                            target = torch.tensor(waypoint, dtype=torch.float32, device=sim._sim.device)
+                            target[5] = phase["gripper"]
+                            sim._target_pos[0] = target
+                            sim.step()
+                            # Record step data
+                            record_step(f, sim, camera_gripper, target, phase["gripper"])
+                    # time.sleep(3)
 
-                    sim._target_pos[0] = target
-                    sim.step()
+            grasp_status = check_grasp_success_dual(sim, initial_obj_pos)
 
-                    # Record step data
-                    record_step(f, sim, camera_gripper, target, phase["gripper"])
 
-            # 6. Check grasp success
+            print(f"    Grasp Detection:")
+            print(f"      - Gripper closed: {grasp_status['gripper_closed']} (angle: {grasp_status['gripper_angle']:.3f})")
+            print(f"      - Object lifted: {grasp_status['object_lifted']} (Δh: {grasp_status['height_delta']:.3f}m)")
+            print(f"      - Object position: [{grasp_status['object_pos'][0]:.3f}, {grasp_status['object_pos'][1]:.3f}, {grasp_status['object_pos'][2]:.3f}]")
+            print(f"      - Grasp SUCCESS: {grasp_status['grasped']}")
+
+            # 6. Check final placement success
             success = check_grasp_success(sim, PLACE_POS)
 
         except Exception as exc:
@@ -1137,72 +1224,144 @@ def data_produce():
     sim.close()
 
 
-def plan_grasp_trajectory(sim: SimIsaacModel, object_pos: tuple, place_pos: tuple) -> list[dict]:
-    """Plan a full pick-and-place trajectory as a sequence of phases."""
+# 按照规则全部规划完之后 统一执行
+def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, place_pos: tuple) -> list[dict]:
+    """Plan a full pick-and-place trajectory as a sequence of phases.
+
+    Optimized grasp logic:
+    1. Move to pre-grasp position above object with gripper open
+    2. Descend to grasp position while keeping gripper open
+    3. Close gripper to grasp object
+    4. Lift object up
+    5. Return to home position while maintaining grasp
+    6. Move to place position
+    7. Descend to place
+    8. Release gripper
+    9. Return to home position
+
+    Each phase is planned based on the final waypoint of the previous phase,
+    ensuring continuous and deterministic trajectory planning without relying
+    on real-time servo angles.
+    
+    
+    预先定义好的是这几个任务， TODO 后续改成 vla 规划出来 phases 后面的改为参数形式
+    missions = ["move_up", "move_down", "grasp_close", "lift_up", "move_home"]
+    """
     phases = []
 
-    grasp_height = max(object_pos[2], OBJ_Z)
+    grasp_height = max(object_pos[2] , OBJ_Z)
     place_height = max(place_pos[2], OBJ_Z)
 
-    # Phase 1: Approach (move to pre-grasp position)
-    pre_grasp_pos = (object_pos[0], object_pos[1], grasp_height + PRE_GRASP_HEIGHT_OFFSET)
-    pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, steps=STEPS_PER_PHASE)
-    phases.append({
-        "name": "approach",
-        "waypoints": pre_grasp_traj,
-        "gripper": GRIPPER_OPEN,
-    })
+    # Get home position for return trajectory
+    home_joints = sim._robot.data.default_joint_pos[0, :6].cpu().tolist()
 
-    # Phase 2: Descend to grasp position
-    grasp_pos = (object_pos[0], object_pos[1], grasp_height)
-    grasp_traj = sim.isaac_ik_trace(grasp_pos, steps=STEPS_PER_PHASE)
-    phases.append({
-        "name": "descend",
-        "waypoints": grasp_traj,
-        "gripper": GRIPPER_OPEN,
-    })
+    if mission == "move_up":
+        # Phase 1: Approach (move to pre-grasp position above object)
+        pre_grasp_pos = (object_pos[0] + OBJ_H / 2, object_pos[1] + OBJ_H / 2, grasp_height + PRE_GRASP_HEIGHT_OFFSET)
+        pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, steps=STEPS_PER_PHASE)
+        phases.append({
+            "name": "approach",
+            "waypoints": pre_grasp_traj,
+            "gripper": GRIPPER_OPEN,
+        })
+    elif mission == "grasp_open":
+        # 只打开夹爪 位置不改变
+        # 获取 关节角度值
+        joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()  # Get first 6 joints (exclude gripper)
+        phases.append({
+            "name": "grasp_open",
+            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
+            "gripper": GRIPPER_OPEN,
+        })
+    elif mission == "move_down":
+        # Phase 2: Descend to grasp position (gripper remains open)
+        grasp_pos = (object_pos[0] + OBJ_H / 2, object_pos[1] + OBJ_H / 2, grasp_height)
+        grasp_traj = sim.isaac_ik_trace(grasp_pos, steps=STEPS_PER_PHASE)
+        phases.append({
+            "name": "descend",
+            "waypoints": grasp_traj,
+            "gripper": GRIPPER_OPEN,
+        })
+    elif mission == "grasp_close":
+        # Phase 3: Close gripper to grasp object
+        # Use the final waypoint from Phase 2 (descend)
+        joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()
+        phases.append({
+            "name": "close_gripper",
+            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
+            "gripper": GRIPPER_GRASP,
+        })
+    elif mission == "lift_up":
+        # Phase 4: Lift object up
+        # Based on the final waypoint of Phase 3 (which is same as Phase 2's end position)
+        lift_pos = (object_pos[0] + OBJ_H / 2, object_pos[1] + OBJ_H / 2, max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
+        lift_traj = sim.isaac_ik_trace(lift_pos, steps=STEPS_PER_PHASE)
+        phases.append({
+            "name": "lift",
+            "waypoints": lift_traj,
+            "gripper": GRIPPER_GRASP,
+        })
+    elif mission == "move_home":
+        # Phase 5: Return to home position while maintaining grasp
+        # Interpolate from the final waypoint of Phase 4 (lift) to home joints
+        joints_after_lift = lift_traj[-1][:6]
+        return_home_traj = []
+        for i in range(STEPS_PER_PHASE):
+            alpha = i / (STEPS_PER_PHASE - 1) if STEPS_PER_PHASE > 1 else 1.0
+            waypoint = [
+                joints_after_lift[j] + alpha * (home_joints[j] - joints_after_lift[j])
+                for j in range(6)
+            ]
+            return_home_traj.append(waypoint)
+        phases.append({
+            "name": "return_home",
+            "waypoints": return_home_traj,
+            "gripper": GRIPPER_GRASP,
+        })
 
-    # Phase 3: Close gripper
-    current_joints = sim.get_joint_angles()
-    phases.append({
-        "name": "close_gripper",
-        "waypoints": [current_joints for _ in range(STEPS_PER_PHASE)],
-        "gripper": GRIPPER_CLOSED,
-    })
-
-    # Phase 4: Lift
-    lift_pos = (object_pos[0], object_pos[1], max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
-    lift_traj = sim.isaac_ik_trace(lift_pos, steps=STEPS_PER_PHASE)
-    phases.append({
-        "name": "lift",
-        "waypoints": lift_traj,
-        "gripper": GRIPPER_CLOSED,
-    })
-
-    # Phase 5: Move to place position
-    pre_place_pos = (place_pos[0], place_pos[1], max(LIFT_HEIGHT, place_height + PRE_GRASP_HEIGHT_OFFSET))
-    move_traj = sim.isaac_ik_trace(pre_place_pos, steps=STEPS_PER_PHASE)
-    phases.append({
-        "name": "move_to_place",
-        "waypoints": move_traj,
-        "gripper": GRIPPER_CLOSED,
-    })
-
-    # Phase 6: Descend to place
-    place_traj = sim.isaac_ik_trace((place_pos[0], place_pos[1], place_height), steps=STEPS_PER_PHASE)
-    phases.append({
-        "name": "place_descend",
-        "waypoints": place_traj,
-        "gripper": GRIPPER_CLOSED,
-    })
-
-    # Phase 7: Release gripper
-    current_joints = sim.get_joint_angles()
-    phases.append({
-        "name": "release",
-        "waypoints": [current_joints for _ in range(STEPS_PER_PHASE)],
-        "gripper": GRIPPER_OPEN,
-    })
+    # TODO 后续阶段未使用
+    elif mission == "move_pos":
+        # Phase 6: Move to place position
+        pre_place_pos = (place_pos[0], place_pos[1], max(LIFT_HEIGHT, place_height + PRE_GRASP_HEIGHT_OFFSET))
+        move_traj = sim.isaac_ik_trace(pre_place_pos, steps=STEPS_PER_PHASE)
+        phases.append({
+            "name": "move_to_place",
+            "waypoints": move_traj,
+            "gripper": GRIPPER_CLOSED,
+        })
+    elif mission == "full_grasp_place":
+        # Phase 7: Descend to place
+        place_traj = sim.isaac_ik_trace((place_pos[0], place_pos[1], place_height), steps=STEPS_PER_PHASE)
+        phases.append({
+            "name": "place_descend",
+            "waypoints": place_traj,
+            "gripper": GRIPPER_CLOSED,
+        })
+    elif mission == "release":
+        # Phase 8: Release gripper
+        # Use the final waypoint from Phase 7 (place_descend)
+        joints_at_place = place_traj[-1][:6]
+        phases.append({
+            "name": "release",
+            "waypoints": [joints_at_place for _ in range(STEPS_PER_PHASE)],
+            "gripper": GRIPPER_OPEN,
+        })
+    elif mission == "final_return_home":
+        # Phase 9: Return to home position after release
+        # Interpolate from the final waypoint of Phase 8 (which is same as Phase 7's end) to home joints
+        final_return_traj = []
+        for i in range(STEPS_PER_PHASE):
+            alpha = i / (STEPS_PER_PHASE - 1) if STEPS_PER_PHASE > 1 else 1.0
+            waypoint = [
+                joints_at_place[j] + alpha * (home_joints[j] - joints_at_place[j])
+                for j in range(6)
+            ]
+            final_return_traj.append(waypoint)
+        phases.append({
+            "name": "final_return_home",
+            "waypoints": final_return_traj,
+            "gripper": GRIPPER_OPEN,
+        })
 
     return phases
 
@@ -1231,6 +1390,52 @@ def record_step(f: h5py.File, sim: SimIsaacModel, camera_gripper: Camera, action
         ds = f[key]
         ds.resize(ds.shape[0] + 1, axis=0)
         ds[-1] = data
+
+
+def check_grasp_success_dual(sim: SimIsaacModel, initial_obj_pos: np.ndarray,
+                             gripper_closed_threshold: float = 0.02,
+                             height_threshold: float = 0.05) -> dict:
+    """Check if object is grasped using dual criteria:
+
+    1. Gripper state: Check if gripper is closed (indicating contact with object)
+    2. Object position: Check if object has been lifted from initial position
+
+    Args:
+        sim: Simulation model
+        initial_obj_pos: Initial object position before grasp attempt
+        gripper_closed_threshold: Minimum gripper closure angle to consider grasping
+        height_threshold: Minimum height increase to confirm object is lifted
+
+    Returns:
+        dict with keys:
+            - 'grasped': bool, True if both criteria are met
+            - 'gripper_closed': bool, gripper closure state
+            - 'object_lifted': bool, object lift state
+            - 'gripper_angle': float, current gripper angle
+            - 'object_pos': np.ndarray, current object position
+            - 'height_delta': float, height change from initial position
+    """
+    # Criterion 1: Check gripper state
+    gripper_angle = sim.gripper_state()
+    gripper_closed = abs(gripper_angle - GRIPPER_OPEN) > gripper_closed_threshold
+
+    # Criterion 2: Check object position
+    cube = sim._scene["cube"]
+    current_obj_pos = cube.data.root_pos_w[0].cpu().numpy()
+    height_delta = current_obj_pos[2] - initial_obj_pos[2]
+    object_lifted = height_delta > height_threshold
+
+    # Both criteria must be met for successful grasp
+    grasped = gripper_closed and object_lifted
+
+    return {
+        'grasped': grasped,
+        'gripper_closed': gripper_closed,
+        'object_lifted': object_lifted,
+        'gripper_angle': gripper_angle,
+        'object_pos': current_obj_pos,
+        'height_delta': height_delta,
+    }
 
 
 def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float = 0.05) -> bool:
