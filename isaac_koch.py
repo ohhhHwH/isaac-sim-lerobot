@@ -59,12 +59,14 @@ OBJ_Z = 0.015                 # half cube size, sitting on ground
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
 OBJ_L = 0.02
-OBJ_W = 0.02
+OBJ_W = 0.08
 OBJ_H = 0.02
+GRIPPER_OFFSET = 0.02 # 夹爪略微偏一点，静态爪与物体不碰撞
 
 # Gripper joint values
+
 GRIPPER_OPEN = -1.0
-GRIPPER_GRASP = -0.075
+GRIPPER_GRASP = -0.1
 GRIPPER_CLOSED = 0.0
 
 # Trajectory interpolation
@@ -175,10 +177,10 @@ class SimIsaacModel:
         actuators={
             "all_joints": ImplicitActuatorCfg( # 统一配置所有关节的 actuator，方便后续调整 PD 增益实现稳定模式切换
                 joint_names_expr=[".*"], # 匹配所有关节
-                effort_limit_sim=100.0, # 仿真中的力矩限制，过高可能导致不稳定，过低可能无法驱动机械臂
-                velocity_limit_sim=100.0, # 仿真中的速度限制，过高可能导致不稳定，过低可能导致响应变慢
-                stiffness=400.0,
-                damping=40.0,
+                effort_limit_sim=5.0, # 仿真中的力矩限制，过高可能导致不稳定，过低可能无法驱动机械臂
+                velocity_limit_sim=5.0, # 仿真中的速度限制，过高可能导致不稳定，过低可能导致响应变慢
+                stiffness=400.0, # 默认刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
+                damping=60.0, # 默认阻尼，较高值可减少震荡但可能导致响应变慢
             ),
         },
     )
@@ -217,6 +219,37 @@ class SimIsaacModel:
             ),
         )
 
+        # 抓取物体属性配置
+        # 刚体属性配置
+        self._obj_rigid_props = sim_utils.RigidBodyPropertiesCfg(
+                        linear_damping=1.0,      # 线性阻尼：减少平移运动的晃动
+                        angular_damping=1.0,     # 角阻尼：减少旋转运动的晃动
+                        max_linear_velocity=1.0, # 最大线速度限制 (m/s)
+                        max_angular_velocity=57.3, # 最大角速度限制 (deg/s) ≈ 1 rad/s
+                        disable_gravity=False,   # 启用重力
+                    )
+        # 质量属性配置
+        self._obj_mass_props=sim_utils.MassPropertiesCfg(
+            mass=0.02,               # 质量 0.02kg，适当的质量提高稳定性
+        )
+        # 碰撞属性配置 - 关键参数用于提高抓取成功率
+        self._obj_collision_props=sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.01,    # 接触偏移 (m)：碰撞检测开始的距离
+            rest_offset=0.001,         # 静止偏移 (m)：物体静止时的间隙，0表示紧密接触
+            torsional_patch_radius=0.01,  # 扭转摩擦接触半径 (m)
+            min_torsional_patch_radius=0.005, # 最小扭转摩擦半径 (m)
+        )
+        # 物理材质属性 - 高摩擦低弹性，便于抓取
+        self._obj_physics_material=sim_utils.RigidBodyMaterialCfg(
+            static_friction=1,     # 静摩擦系数：物体静止时的摩擦力，越大越不易滑动
+            dynamic_friction=0.8,    # 动摩擦系数：物体运动时的摩擦力
+            restitution=0,         # 弹性系数：0表示完全非弹性碰撞（不反弹）
+            friction_combine_mode="multiply",  # 摩擦力组合模式：multiply表示相乘
+            restitution_combine_mode="min",    # 弹性组合模式：min表示取最小值
+        )
+        # 视觉材质
+        self._obj_visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1))
+
         # 构建场景配置
         @configclass
         class _SceneCfg(InteractiveSceneCfg):
@@ -236,35 +269,14 @@ class SimIsaacModel:
                 prim_path="{ENV_REGEX_NS}/Cube",
                 spawn=sim_utils.CuboidCfg(
                     size=(OBJ_L, OBJ_W, OBJ_H),  # 立方体尺寸
-                    # 刚体属性配置
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                        linear_damping=1.0,      # 线性阻尼：减少平移运动的晃动
-                        angular_damping=1.0,     # 角阻尼：减少旋转运动的晃动
-                        max_linear_velocity=1.0, # 最大线速度限制 (m/s)
-                        max_angular_velocity=57.3, # 最大角速度限制 (deg/s) ≈ 1 rad/s
-                        disable_gravity=False,   # 启用重力
-                    ),
-                    # 质量属性配置
-                    mass_props=sim_utils.MassPropertiesCfg(
-                        mass=0.02,               # 质量 0.02kg，适当的质量提高稳定性
-                    ),
+                    rigid_props=self._obj_rigid_props,
+                    mass_props=self._obj_mass_props,
                     # 碰撞属性配置 - 关键参数用于提高抓取成功率
-                    collision_props=sim_utils.CollisionPropertiesCfg(
-                        contact_offset=0.002,    # 接触偏移 (m)：碰撞检测开始的距离
-                        rest_offset=0.0,         # 静止偏移 (m)：物体静止时的间隙，0表示紧密接触
-                        torsional_patch_radius=0.01,  # 扭转摩擦接触半径 (m)
-                        min_torsional_patch_radius=0.005, # 最小扭转摩擦半径 (m)
-                    ),
+                    collision_props=self._obj_collision_props,
                     # 物理材质属性 - 高摩擦低弹性，便于抓取
-                    physics_material=sim_utils.RigidBodyMaterialCfg(
-                        static_friction=100,     # 静摩擦系数：物体静止时的摩擦力，越大越不易滑动
-                        dynamic_friction=1.0,    # 动摩擦系数：物体运动时的摩擦力
-                        restitution=0,         # 弹性系数：0表示完全非弹性碰撞（不反弹）
-                        friction_combine_mode="multiply",  # 摩擦力组合模式：multiply表示相乘
-                        restitution_combine_mode="min",    # 弹性组合模式：min表示取最小值
-                    ),
+                    physics_material=self._obj_physics_material,
                     # 视觉材质
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
+                    visual_material=self._obj_visual_material
                 ),
                 init_state=RigidObjectCfg.InitialStateCfg(
                     pos=(0.0, 0.15, OBJ_Z),
@@ -300,13 +312,6 @@ class SimIsaacModel:
                 ),
             )
 
-            # 1) 创建材质配置（调整这两个值改变摩擦）
-            GRIPPER_mat_cfg = RigidBodyMaterialCfg(
-                static_friction=5.0,
-                dynamic_friction=1.0,
-                friction_combine_mode="multiply"
-            )
-            # /Koch/gripper_static_1 和 /Koch/gripper_moving_1 都使用同一个材质配置
             
 
 
@@ -318,8 +323,9 @@ class SimIsaacModel:
         self._sim.set_camera_view([0.5, 0.5, 0.5], [0.0, 0.0, 0.15])
 
         scene_cfg = self._scene_cfg_class(num_envs=1, env_spacing=2.0)
-        self._scene = InteractiveScene(scene_cfg)
 
+        self._scene = InteractiveScene(scene_cfg)
+        
         self._sim.reset()
 
         # 初始化视口和相机系统
@@ -637,7 +643,7 @@ class SimIsaacModel:
         pass
 
     # isaac sim ik 逆运动学求解 - 并插值，生成平滑轨迹
-    def isaac_ik_trace(self, pos, quat = None, steps=10):
+    def isaac_ik_trace(self, pos, quat = None, rot_rad = 0, steps=10):
         """
         参考并使用 IsaacLab 的 DifferentialIKController，求解目标末端位姿对应的关节目标，
         能够在当前关节角和目标关节角之间做线性插值，生成平滑轨迹。
@@ -645,6 +651,7 @@ class SimIsaacModel:
         Args:
             pos: 目标末端位置，世界坐标系，shape=(3,)
             quat: 目标末端四元数 [w, x, y, z]，世界坐标系。默认保持当前末端朝向。
+            rot_rad (float, optional): 末端旋转角度（弧度），用于调整末端朝向. Defaults to 0.
             steps (int, optional): 轨迹分段数. Defaults to 10.
 
         Returns:
@@ -677,6 +684,18 @@ class SimIsaacModel:
             if torch.any(quat_norm < 1e-8):
                 raise ValueError("Target quaternion norm must be non-zero.")
             target_quat_w = target_quat_w / quat_norm
+            
+        if rot_rad != 0:
+            # 构造绕 Z 轴旋转的四元数
+            rot_quat = torch.tensor([
+                math.cos(rot_rad/2),  # w: 实部
+                0,                    # x: 绕X轴分量为0
+                0,                    # y: 绕Y轴分量为0  
+                math.sin(rot_rad/2)   # z: 绕Z轴分量
+            ], dtype=torch.float32, device=device).reshape(1, 4)
+            
+            # 将新旋转叠加到原朝向上
+            target_quat_w = _quat_multiply(rot_quat, target_quat_w)
 
         ee_pos_b, ee_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
         target_pos_b, target_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, target_pos_w, target_quat_w)
@@ -853,11 +872,17 @@ class SimIsaacModel:
         cube.write_root_velocity_to_sim(zero_vel)
 
         print(f"[Object] Randomized cube at ({x:.3f}, {y:.3f}, {z:.3f})")
+        
+        # 根据 rot 算出旋转角度
+        euler_x, euler_y, euler_z = euler_from_quaternion(qw, qx, qy, qz)
+        print(f"[Object] Cube quaternion: (w={qw:.3f}, x={qx:.3f}, y={qy:.3f}, z={qz:.3f})")
+        print(f"[Object] Cube orientation (Euler angles): ({euler_x}°, {euler_y}°, {euler_z}°)")
 
         return {
             'name': 'cube',
             'position': position,
             'orientation': (qw, qx, qy, qz),
+            'euler_angles': (euler_x, euler_y, euler_z),
         }
 
     def remove_random_object(self):
@@ -892,11 +917,15 @@ class SimIsaacModel:
         obj_cfg = RigidObjectCfg(
             prim_path=prim_path,
             spawn=sim_utils.CuboidCfg(
-                size=(size, size, size),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-                mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+                size=(OBJ_L, OBJ_W, OBJ_H),  # 立方体尺寸
+                rigid_props=self._obj_rigid_props,
+                mass_props=self._obj_mass_props,
+                # 碰撞属性配置 - 关键参数用于提高抓取成功率
+                collision_props=self._obj_collision_props,
+                # 物理材质属性 - 高摩擦低弹性，便于抓取
+                physics_material=self._obj_physics_material,
+                # 视觉材质
+                visual_material=self._obj_visual_material
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
                 pos=(x, y, z),
@@ -908,6 +937,8 @@ class SimIsaacModel:
         obj_cfg.spawn.func(prim_path, obj_cfg.spawn, translation=(x, y, z), orientation=(qw, qx, qy, qz))
 
         print(f"[Object] Added: {name} at ({x:.3f}, {y:.3f}, {z:.3f})")
+        # 根据 rot 算出旋转角度
+        euler_x, euler_y, euler_z = euler_from_quaternion(qw, qx, qy, qz)
 
         return {
             'name': name,
@@ -915,6 +946,7 @@ class SimIsaacModel:
             'position': position,
             'size': size,
             'orientation': (qw, qx, qy, qz),
+            'euler_angles': (euler_x, euler_y, euler_z),
         }
 
     def del_object(self, name):
@@ -1003,6 +1035,54 @@ def _rotation_matrix_to_quat(R):
         z = 0.25 * s
     return np.array([w, x, y, z], dtype=np.float32)
 
+def euler_from_quaternion(qw, qx, qy, qz):
+    """
+    从四元数计算欧拉角（roll, pitch, yaw）
+    返回角度为弧度制
+    
+    四元数格式: qw + qx*i + qy*j + qz*k
+    """
+    
+    # Roll (x轴旋转)
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y轴旋转) - 使用asin避免数值超出范围
+    sinp = 2.0 * (qw * qy - qz * qx)
+    # 限制sinp在[-1, 1]范围内防止数值误差
+    sinp = max(-1.0, min(1.0, sinp))
+    pitch = math.asin(sinp)
+    
+    # Yaw (z轴旋转)
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    
+    return roll, pitch, yaw
+
+
+def _quat_multiply(q1, q2):
+    """
+    四元数乘法: q = q1 * q2
+    输入: q1, q2 形状为 (..., 4)，格式 [w, x, y, z]
+    返回: 组合后的四元数
+    """
+    # 提取分量
+    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+    
+    # 计算乘积
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    
+    # 合并并归一化（防止数值漂移）
+    result = torch.stack([w, x, y, z], dim=-1)
+    result = result / torch.norm(result, dim=-1, keepdim=True)
+    
+    return result
 
 # =============================================================================
 # Demo 控制和数据生产
@@ -1142,6 +1222,8 @@ def data_produce():
 
         # 2. Randomize object position
         obj_info = sim.randomize_object()
+        object_rot = obj_info['orientation']
+        object_euler = obj_info['euler_angles']
         object_pos = obj_info['position']
 
         # Settle after object spawn
@@ -1175,7 +1257,7 @@ def data_produce():
                 # 遍历 missions 列表
                 for mission in missions:
                     print(f"  mission: {mission}")
-                    phases = plan_grasp_trajectory(sim, mission, object_pos, PLACE_POS)
+                    phases = plan_grasp_trajectory(sim, mission, object_pos, object_euler, PLACE_POS)
                     # 5. Execute trajectory and record data
                     for phase in phases:
                         print(f"  Phase: {phase['name']}")
@@ -1224,8 +1306,8 @@ def data_produce():
     sim.close()
 
 
-# 按照规则全部规划完之后 统一执行
-def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, place_pos: tuple) -> list[dict]:
+# 按照规则
+def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, object_euler: tuple, place_pos: tuple) -> list[dict]:
     """Plan a full pick-and-place trajectory as a sequence of phases.
 
     Optimized grasp logic:
@@ -1254,11 +1336,19 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, p
 
     # Get home position for return trajectory
     home_joints = sim._robot.data.default_joint_pos[0, :6].cpu().tolist()
+    
+    # 根据 object_rot 确定 物体的旋转角度是多少
+    
+    yaw = object_euler[2] 
+    
 
     if mission == "move_up":
         # Phase 1: Approach (move to pre-grasp position above object)
-        pre_grasp_pos = (object_pos[0] + OBJ_H / 2, object_pos[1] + OBJ_H / 2, grasp_height + PRE_GRASP_HEIGHT_OFFSET)
-        pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, steps=STEPS_PER_PHASE)
+        pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.cos(yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET + OBJ_H * 2)
+        # 进行一个旋转 yaw 角度的偏移，确保和物体的朝向一致，增加抓取成功率
+        
+        
+        pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "approach",
             "waypoints": pre_grasp_traj,
@@ -1275,8 +1365,8 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, p
         })
     elif mission == "move_down":
         # Phase 2: Descend to grasp position (gripper remains open)
-        grasp_pos = (object_pos[0] + OBJ_H / 2, object_pos[1] + OBJ_H / 2, grasp_height)
-        grasp_traj = sim.isaac_ik_trace(grasp_pos, steps=STEPS_PER_PHASE)
+        grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.cos(yaw), OBJ_H)
+        grasp_traj = sim.isaac_ik_trace(grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "descend",
             "waypoints": grasp_traj,
@@ -1294,7 +1384,7 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, p
     elif mission == "lift_up":
         # Phase 4: Lift object up
         # Based on the final waypoint of Phase 3 (which is same as Phase 2's end position)
-        lift_pos = (object_pos[0] + OBJ_H / 2, object_pos[1] + OBJ_H / 2, max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
+        lift_pos = (object_pos[0] , object_pos[1] , max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
         lift_traj = sim.isaac_ik_trace(lift_pos, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "lift",

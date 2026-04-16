@@ -60,6 +60,7 @@ from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 
 
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -68,6 +69,10 @@ URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urdf", "ko
 
 CAM_WIDTH = 640
 CAM_HEIGHT = 480
+
+OBJ_L = 0.02
+OBJ_W = 0.08
+OBJ_H = 0.02
 OBJ_Z = 0.015
 
 KOCH_CFG = ArticulationCfg(
@@ -234,7 +239,7 @@ def build_scene_cfg(custom_cameras: list[dict]) -> type:
         cube = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Cube",
             spawn=sim_utils.CuboidCfg(
-                size=(0.03, 0.03, 0.03),
+                size=(OBJ_L, OBJ_W, OBJ_H),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
