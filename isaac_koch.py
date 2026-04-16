@@ -1252,7 +1252,7 @@ def data_produce():
 
             # 4.5. plan and execute
             fin_flag = False
-            missions = ["move_up", "move_down", "grasp_close", "lift_up", "move_home"]
+            missions = ["move_up", "move_down", "grasp_close", "lift_up"]
             while not fin_flag:
                 # 遍历 missions 列表
                 for mission in missions:
@@ -1271,6 +1271,8 @@ def data_produce():
                             record_step(f, sim, camera_gripper, target, phase["gripper"])
                     # time.sleep(3)
 
+                if missions[-1] == "lift_up":
+                    fin_flag = True
             grasp_status = check_grasp_success_dual(sim, initial_obj_pos)
 
 
@@ -1390,67 +1392,6 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
             "name": "lift",
             "waypoints": lift_traj,
             "gripper": GRIPPER_GRASP,
-        })
-    elif mission == "move_home":
-        # Phase 5: Return to home position while maintaining grasp
-        # Interpolate from the final waypoint of Phase 4 (lift) to home joints
-        joints_after_lift = lift_traj[-1][:6]
-        return_home_traj = []
-        for i in range(STEPS_PER_PHASE):
-            alpha = i / (STEPS_PER_PHASE - 1) if STEPS_PER_PHASE > 1 else 1.0
-            waypoint = [
-                joints_after_lift[j] + alpha * (home_joints[j] - joints_after_lift[j])
-                for j in range(6)
-            ]
-            return_home_traj.append(waypoint)
-        phases.append({
-            "name": "return_home",
-            "waypoints": return_home_traj,
-            "gripper": GRIPPER_GRASP,
-        })
-
-    # TODO 后续阶段未使用
-    elif mission == "move_pos":
-        # Phase 6: Move to place position
-        pre_place_pos = (place_pos[0], place_pos[1], max(LIFT_HEIGHT, place_height + PRE_GRASP_HEIGHT_OFFSET))
-        move_traj = sim.isaac_ik_trace(pre_place_pos, steps=STEPS_PER_PHASE)
-        phases.append({
-            "name": "move_to_place",
-            "waypoints": move_traj,
-            "gripper": GRIPPER_CLOSED,
-        })
-    elif mission == "full_grasp_place":
-        # Phase 7: Descend to place
-        place_traj = sim.isaac_ik_trace((place_pos[0], place_pos[1], place_height), steps=STEPS_PER_PHASE)
-        phases.append({
-            "name": "place_descend",
-            "waypoints": place_traj,
-            "gripper": GRIPPER_CLOSED,
-        })
-    elif mission == "release":
-        # Phase 8: Release gripper
-        # Use the final waypoint from Phase 7 (place_descend)
-        joints_at_place = place_traj[-1][:6]
-        phases.append({
-            "name": "release",
-            "waypoints": [joints_at_place for _ in range(STEPS_PER_PHASE)],
-            "gripper": GRIPPER_OPEN,
-        })
-    elif mission == "final_return_home":
-        # Phase 9: Return to home position after release
-        # Interpolate from the final waypoint of Phase 8 (which is same as Phase 7's end) to home joints
-        final_return_traj = []
-        for i in range(STEPS_PER_PHASE):
-            alpha = i / (STEPS_PER_PHASE - 1) if STEPS_PER_PHASE > 1 else 1.0
-            waypoint = [
-                joints_at_place[j] + alpha * (home_joints[j] - joints_at_place[j])
-                for j in range(6)
-            ]
-            final_return_traj.append(waypoint)
-        phases.append({
-            "name": "final_return_home",
-            "waypoints": final_return_traj,
-            "gripper": GRIPPER_OPEN,
         })
 
     return phases
