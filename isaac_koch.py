@@ -45,12 +45,14 @@ from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
 import h5py
 import random
 
+DEBUG_MODE = True  # 调试模式
+# 启用后方块位置固定
 
 # --- 常量配置 ---
 URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urdf", "koch.urdf")
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint_gripper"]
 ANGLE_STEP = 0.05  # 每次按键旋转弧度 (~2.9°)
-NUM_EXPISODES = 5
+NUM_EXPISODES = 2
 
 # Object randomization ranges (from data_produce.py)
 OBJ_X_RANGE = (-0.05, 0.05)   # left-right (narrow, centered)
@@ -58,7 +60,7 @@ OBJ_Y_RANGE = (0.10, 0.15)    # forward from robot base
 OBJ_Z = 0.015                 # half cube size, sitting on ground
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
-OBJ_L = 0.02
+OBJ_L = 0.005
 OBJ_W = 0.08
 OBJ_H = 0.02
 GRIPPER_OFFSET = 0.02 # 夹爪略微偏一点，静态爪与物体不碰撞
@@ -66,11 +68,11 @@ GRIPPER_OFFSET = 0.02 # 夹爪略微偏一点，静态爪与物体不碰撞
 # Gripper joint values
 
 GRIPPER_OPEN = -1.0
-GRIPPER_GRASP = -0.1
+GRIPPER_GRASP = 0
 GRIPPER_CLOSED = 0.0
 
 # Trajectory interpolation
-STEPS_PER_PHASE = 30
+STEPS_PER_PHASE = 60
 
 # Camera resolution
 CAM_WIDTH = 640
@@ -176,11 +178,18 @@ class SimIsaacModel:
         init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)), # 初始位置
         actuators={
             "all_joints": ImplicitActuatorCfg( # 统一配置所有关节的 actuator，方便后续调整 PD 增益实现稳定模式切换
-                joint_names_expr=[".*"], # 匹配所有关节
+                joint_names_expr=["joint[1-5]"], # 匹配所有关节
                 effort_limit_sim=5.0, # 仿真中的力矩限制，过高可能导致不稳定，过低可能无法驱动机械臂
                 velocity_limit_sim=5.0, # 仿真中的速度限制，过高可能导致不稳定，过低可能导致响应变慢
                 stiffness=400.0, # 默认刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
                 damping=60.0, # 默认阻尼，较高值可减少震荡但可能导致响应变慢
+            ),
+            "gripper": ImplicitActuatorCfg(
+                joint_names_expr=["joint_gripper"], # gripper joint
+                effort_limit_sim=10,   # 限制更小的力矩
+                # 关键：低刚度 + 高阻尼 = 柔顺控制，允许夹爪在接触时有一定的顺应性，减少对物体的冲击和震荡，提高抓取成功率
+                stiffness=200.0,          # 0 → 夹爪不被位置伺服强制到目标（变得顺从/合规）
+                damping=120,            # 小阻尼避免完全失控震荡
             ),
         },
     )
@@ -227,25 +236,40 @@ class SimIsaacModel:
                         max_linear_velocity=1.0, # 最大线速度限制 (m/s)
                         max_angular_velocity=57.3, # 最大角速度限制 (deg/s) ≈ 1 rad/s
                         disable_gravity=False,   # 启用重力
+                        kinematic_enabled=False,      # 是否为运动学物体
+                        
+                        # 高级稳定性参数
+                        max_depenetration_velocity=10.0,  # 最大分离速度，防止穿透后弹出
+                        solver_position_iteration_count=4,  # 位置求解迭代次数
+                        solver_velocity_iteration_count=1,  # 速度求解迭代次数
+                        sleep_threshold=0.005,        # 休眠阈值，低于此速度进入休眠节省计算
+                        stabilization_threshold=0.001, # 稳定化阈值
                     )
         # 质量属性配置
         self._obj_mass_props=sim_utils.MassPropertiesCfg(
             mass=0.02,               # 质量 0.02kg，适当的质量提高稳定性
+            # density=500.0,            # 密度 500kg/m³
         )
         # 碰撞属性配置 - 关键参数用于提高抓取成功率
         self._obj_collision_props=sim_utils.CollisionPropertiesCfg(
-            contact_offset=0.01,    # 接触偏移 (m)：碰撞检测开始的距离
+            contact_offset=0.005,    # 接触偏移 (m)：碰撞检测开始的距离
             rest_offset=0.001,         # 静止偏移 (m)：物体静止时的间隙，0表示紧密接触
-            torsional_patch_radius=0.01,  # 扭转摩擦接触半径 (m)
-            min_torsional_patch_radius=0.005, # 最小扭转摩擦半径 (m)
+            torsional_patch_radius=0.04,  # 扭转摩擦接触半径 (m)
+            min_torsional_patch_radius=0.01, # 最小扭转摩擦半径 (m)
+            
+            # 高级碰撞参数
+            # collision_enabled=True,      # 是否启用碰撞（默认True）
         )
         # 物理材质属性 - 高摩擦低弹性，便于抓取
         self._obj_physics_material=sim_utils.RigidBodyMaterialCfg(
-            static_friction=1,     # 静摩擦系数：物体静止时的摩擦力，越大越不易滑动
-            dynamic_friction=0.8,    # 动摩擦系数：物体运动时的摩擦力
+            static_friction=100,     # 静摩擦系数：物体静止时的摩擦力，越大越不易滑动
+            dynamic_friction=80,    # 动摩擦系数：物体运动时的摩擦力
             restitution=0,         # 弹性系数：0表示完全非弹性碰撞（不反弹）
             friction_combine_mode="multiply",  # 摩擦力组合模式：multiply表示相乘
             restitution_combine_mode="min",    # 弹性组合模式：min表示取最小值
+            # 高级摩擦参数
+            # friction_restitute=0.0,      # 摩擦恢复
+            # improve_patch_friction=True,  # 改进接触面摩擦计算
         )
         # 视觉材质
         self._obj_visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1))
@@ -861,6 +885,12 @@ class SimIsaacModel:
         qw = math.cos(yaw / 2)
         qx, qy = 0.0, 0.0
         qz = math.sin(yaw / 2)
+        if DEBUG_MODE :
+            # 固定位置和朝向用于调试
+            x, y, z = 0.0, 0.15, OBJ_Z
+            qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
+            position = (x, y, z)
+            
 
         # Write to simulation
         pose = torch.tensor([[x, y, z, qw, qx, qy, qz]], dtype=torch.float32, device=cube.device)
@@ -1483,5 +1513,5 @@ if __name__ == "__main__":
     # demo_control()
     data_produce()
 
-# 最后关闭
-simulation_app.close()
+    # 最后关闭
+    simulation_app.close()
