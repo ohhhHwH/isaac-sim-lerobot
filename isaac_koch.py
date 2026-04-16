@@ -1282,7 +1282,7 @@ def data_produce():
 
             # 4.5. plan and execute
             fin_flag = False
-            missions = ["move_up", "move_down", "grasp_close", "lift_up"]
+            missions = ["move_up", "move_down", "grasp_close", "lift_up", "hold"]
             while not fin_flag:
                 # 遍历 missions 列表
                 for mission in missions:
@@ -1301,8 +1301,8 @@ def data_produce():
                             record_step(f, sim, camera_gripper, target, phase["gripper"])
                     # time.sleep(3)
 
-                if missions[-1] == "lift_up":
-                    fin_flag = True
+                
+                fin_flag = True
             grasp_status = check_grasp_success_dual(sim, initial_obj_pos)
 
 
@@ -1423,7 +1423,13 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
             "waypoints": lift_traj,
             "gripper": GRIPPER_GRASP,
         })
-
+    elif mission == "hold":
+        joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()
+        phases.append({
+            "name": "hold",
+            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE*2)],
+            "gripper": GRIPPER_GRASP,
+        })
     return phases
 
 
