@@ -40,6 +40,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, subtract_frame_transforms
 from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
+from isaaclab.sensors import ContactSensorCfg
 
 
 import h5py
@@ -152,48 +153,6 @@ class KeyboardController:
 class SimIsaacModel:
     """Isaac机械臂仿真器，封装了仿真循环、控制、视角和稳定模式"""
 
-    # --- 机械臂配置 ---
-    KOCH_CFG = ArticulationCfg(
-        spawn=sim_utils.UrdfFileCfg(
-            asset_path=URDF_PATH,
-            fix_base=True,# 固定底座
-            joint_drive=sim_utils.UrdfFileCfg.JointDriveCfg( # 默认使用力控制，配合 PD 增益实现位置控制
-                drive_type="force", # 使用力控制，配合 PD 增益实现位置控制
-                target_type="position", # 目标为位置
-                gains=sim_utils.UrdfFileCfg.JointDriveCfg.PDGainsCfg( # 默认 PD 增益，后续可通过 toggle_stable_mode 调整
-                    stiffness=400.0, # 刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
-                    damping=40.0, # 阻尼，较高值可减少震荡但可能导致响应变慢
-                ),
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg( # 机械臂根部属性
-                enabled_self_collisions=True, # 启用自碰撞，防止机械臂自身穿透
-                solver_position_iteration_count=8, # 增加迭代次数提高稳定性，减少震荡
-                solver_velocity_iteration_count=0, # 速度迭代通常不需要，保持默认
-            ),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg( # 刚体属性
-                disable_gravity=False, # 启用重力
-                max_depenetration_velocity=5.0, # 限制最大分离速度，防止穿透后弹出过快导致不稳定
-            ),
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)), # 初始位置
-        actuators={
-            "all_joints": ImplicitActuatorCfg( # 统一配置所有关节的 actuator，方便后续调整 PD 增益实现稳定模式切换
-                joint_names_expr=["joint[1-5]"], # 匹配所有关节
-                effort_limit_sim=5.0, # 仿真中的力矩限制，过高可能导致不稳定，过低可能无法驱动机械臂
-                velocity_limit_sim=5.0, # 仿真中的速度限制，过高可能导致不稳定，过低可能导致响应变慢
-                stiffness=400.0, # 默认刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
-                damping=60.0, # 默认阻尼，较高值可减少震荡但可能导致响应变慢
-            ),
-            "gripper": ImplicitActuatorCfg(
-                joint_names_expr=["joint_gripper"], # gripper joint
-                effort_limit_sim=10,   # 限制更小的力矩
-                # 关键：低刚度 + 高阻尼 = 柔顺控制，允许夹爪在接触时有一定的顺应性，减少对物体的冲击和震荡，提高抓取成功率
-                stiffness=200.0,          # 0 → 夹爪不被位置伺服强制到目标（变得顺从/合规）
-                damping=120,            # 小阻尼避免完全失控震荡
-            ),
-        },
-    )
-
     # 初始化
     def __init__(self, urdf_path):
         self._urdf_path = urdf_path
@@ -204,28 +163,46 @@ class SimIsaacModel:
         self._object_counter = 0  # Counter for unique object names
 
         # 更新 URDF 路径
-        self.KOCH_CFG = SimIsaacModel.KOCH_CFG.replace(
+        self.KOCH_CFG = ArticulationCfg(
             spawn=sim_utils.UrdfFileCfg(
-                asset_path=urdf_path,
-                fix_base=True,
-                joint_drive=sim_utils.UrdfFileCfg.JointDriveCfg(
-                    drive_type="force",
-                    target_type="position",
-                    gains=sim_utils.UrdfFileCfg.JointDriveCfg.PDGainsCfg(
-                        stiffness=400.0,
-                        damping=40.0,
+                asset_path=URDF_PATH,
+                activate_contact_sensors=True, # 启用 sensors
+                fix_base=True,# 固定底座
+                joint_drive=sim_utils.UrdfFileCfg.JointDriveCfg( # 默认使用力控制，配合 PD 增益实现位置控制
+                    drive_type="force", # 使用力控制，配合 PD 增益实现位置控制
+                    target_type="position", # 目标为位置
+                    gains=sim_utils.UrdfFileCfg.JointDriveCfg.PDGainsCfg( # 默认 PD 增益，后续可通过 toggle_stable_mode 调整
+                        stiffness=400.0, # 刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
+                        damping=40.0, # 阻尼，较高值可减少震荡但可能导致响应变慢
                     ),
                 ),
-                articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                    enabled_self_collisions=True,
-                    solver_position_iteration_count=8,
-                    solver_velocity_iteration_count=0,
+                articulation_props=sim_utils.ArticulationRootPropertiesCfg( # 机械臂根部属性
+                    enabled_self_collisions=True, # 启用自碰撞，防止机械臂自身穿透
+                    solver_position_iteration_count=8, # 增加迭代次数提高稳定性，减少震荡
+                    solver_velocity_iteration_count=0, # 速度迭代通常不需要，保持默认
                 ),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False,
-                    max_depenetration_velocity=5.0,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg( # 刚体属性
+                    disable_gravity=False, # 启用重力
+                    max_depenetration_velocity=5.0, # 限制最大分离速度，防止穿透后弹出过快导致不稳定
                 ),
             ),
+            init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)), # 初始位置
+            actuators={
+                "all_joints": ImplicitActuatorCfg( # 统一配置所有关节的 actuator，方便后续调整 PD 增益实现稳定模式切换
+                    joint_names_expr=["joint[1-5]"], # 匹配所有关节
+                    effort_limit_sim=5.0, # 仿真中的力矩限制，过高可能导致不稳定，过低可能无法驱动机械臂
+                    velocity_limit_sim=5.0, # 仿真中的速度限制，过高可能导致不稳定，过低可能导致响应变慢
+                    stiffness=400.0, # 默认刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
+                    damping=60.0, # 默认阻尼，较高值可减少震荡但可能导致响应变慢
+                ),
+                "gripper": ImplicitActuatorCfg(
+                    joint_names_expr=["joint_gripper"], # gripper joint
+                    effort_limit_sim=10,   # 限制更小的力矩
+                    # 关键：低刚度 + 高阻尼 = 柔顺控制，允许夹爪在接触时有一定的顺应性，减少对物体的冲击和震荡，提高抓取成功率
+                    stiffness=200.0,          # 0 → 夹爪不被位置伺服强制到目标（变得顺从/合规）
+                    damping=120,            # 小阻尼避免完全失控震荡
+                ),
+            },
         )
 
         # 抓取物体属性配置
@@ -293,6 +270,7 @@ class SimIsaacModel:
                 prim_path="{ENV_REGEX_NS}/Cube",
                 spawn=sim_utils.CuboidCfg(
                     size=(OBJ_L, OBJ_W, OBJ_H),  # 立方体尺寸
+                    activate_contact_sensors=True, # 启用 sensors
                     rigid_props=self._obj_rigid_props,
                     mass_props=self._obj_mass_props,
                     # 碰撞属性配置 - 关键参数用于提高抓取成功率
@@ -337,6 +315,55 @@ class SimIsaacModel:
             )
 
             
+            # --- 夹爪上（两个连杆）被 Cube 施加的力：分别在活动抓手和静态爪体上放传感器 ---
+            # 说明：prim_path 指定传感器挂载的 prim（必须唯一对应该环境内的一个 body），
+            # filter_prim_paths_expr 用于只报告与哪些 prim 的接触（这里只跟 Cube 的接触会被上报）
+            gripper_move_contact_cfg = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",   # 传感器挂在活动爪体（moving）
+                filter_prim_paths_expr=["{ENV_REGEX_NS}/Cube"],     # 只跟 Cube 的接触被记录
+                track_pose=True,               # 是否记录传感器原点位姿（world frame）
+                track_contact_points=True,     # 是否记录每个接触点的位置（用于可视化/定位力箭头）
+                track_friction_forces=True,    # 是否记录摩擦（切向）分力
+                track_air_time=True,           # 是否追踪“空中/接触”时间（需要 force_threshold）
+                force_threshold=0.5,           # 小于此合力范数被认为“无接触”（用于 track_air_time）
+                debug_vis=True,                # 在场景中画力箭头/接触点，便于调试验证
+                update_period=0.0,             # 0.0 表示每个仿真步都更新
+                history_length=6,              # 保存的历史帧数（用于平滑/历史查询）
+                max_contact_data_count_per_prim=32,  # 每个 prim 最多保存多少个接触记录（避免数据溢出）
+            )
+
+            gripper_static_contact_cfg = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Koch/gripper_static_1",  # 传感器挂在静态爪体（static）
+                filter_prim_paths_expr=["{ENV_REGEX_NS}/Cube"],
+                track_pose=True,
+                track_contact_points=True,
+                track_friction_forces=True,
+                track_air_time=True,
+                force_threshold=0.5,
+                debug_vis=True,
+                update_period=0.0,
+                history_length=6,
+                max_contact_data_count_per_prim=32,
+            )
+
+            # --- 在 Cube 上放一个传感器，用来观测 Cube 受到夹爪施加的力（便于从被施力对象角度分析） ---
+            # 说明：把传感器放在 Cube 上可以直接读取 Cube 受到的合力、接触点和摩擦力（同一 contact 以不同侧上报）
+            cube_contact_forces = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Cube",  # 将传感器放在被抓取物体上（必须精确对应场景中的 Cube prim）
+                filter_prim_paths_expr=[
+                    "{ENV_REGEX_NS}/Koch/gripper_moving_1",
+                    "{ENV_REGEX_NS}/Koch/gripper_static_1",
+                ],  # 只关注来自夹爪两个 body 的接触
+                track_pose=False,              # 通常物体本身位姿通过 object.data.root_pos_w 可得，传感器不必重复记录
+                track_contact_points=True,     # 记录所有接触点位置（用于定位受力位置）
+                track_friction_forces=True,    # 记录摩擦力分量
+                track_air_time=False,          # 对物体通常不需要追踪 air/contact 时间，可按需打开
+                force_threshold=0.5,
+                debug_vis=True,                # 在世界中绘制受力箭头（来自 contact_pos_w 和力向量）
+                update_period=0.0,
+                history_length=6,
+                max_contact_data_count_per_prim=32,
+            )
 
 
         self._scene_cfg_class = _SceneCfg
@@ -345,12 +372,12 @@ class SimIsaacModel:
         sim_cfg = sim_utils.SimulationCfg(device=args_cli.device if hasattr(args_cli, 'device') and args_cli.device else "cuda:0")
         self._sim = sim_utils.SimulationContext(sim_cfg)
         self._sim.set_camera_view([0.5, 0.5, 0.5], [0.0, 0.0, 0.15])
-
         scene_cfg = self._scene_cfg_class(num_envs=1, env_spacing=2.0)
-
         self._scene = InteractiveScene(scene_cfg)
-        
         self._sim.reset()
+
+        
+
 
         # 初始化视口和相机系统
         self._viewport = get_viewport_from_window_name("Viewport")
@@ -393,8 +420,9 @@ class SimIsaacModel:
         })
         self.add_sensor_view("gripper_cam",
                              "/World/envs/env_0/Koch/gripper_static_1/gripper_cam")
-        
         # self.add_viewport("top")  # 启动时默认显示 top 视角的 viewport TODO 仍有问题，仍需手动添加
+        
+        
 
         print("[INFO]: SimIsaacModel setup complete.")
 
@@ -804,12 +832,31 @@ class SimIsaacModel:
             'joint_angles': q.tolist(),
         }
 
+    def contact_sensor_infor(self):
+        # print information from the sensors
+        print("-------------------------------")
+        print(self._scene["gripper_move_contact_cfg"])
+        print("Received force matrix of: ", self._scene["gripper_move_contact_cfg"].data.force_matrix_w)
+        print("Received contact force of: ", self._scene["gripper_move_contact_cfg"].data.net_forces_w)
+        print("-------------------------------")
+        print(self._scene["gripper_static_contact_cfg"])
+        print("Received force matrix of: ", self._scene["gripper_static_contact_cfg"].data.force_matrix_w)
+        print("Received contact force of: ", self._scene["gripper_static_contact_cfg"].data.net_forces_w)
+        print("-------------------------------")
+        print(self._scene["cube_contact_forces"])
+        print("Received force matrix of: ", self._scene["cube_contact_forces"].data.force_matrix_w)
+        print("Received contact force of: ", self._scene["cube_contact_forces"].data.net_forces_w)
+        print("-------------------------------")
+
+        
     def step(self):
         """执行一步仿真"""
         self._robot.set_joint_position_target(self._target_pos)
         self._scene.write_data_to_sim()
         self._sim.step()
         self._scene.update(self._sim_dt)
+        if DEBUG_MODE:
+            self.contact_sensor_infor()
 
     def reset(self):
         """重置机械臂到默认位置"""
@@ -1207,7 +1254,7 @@ def demo_control():
 
     # 清理
     kb.stop()
-    sim.close()
+    # sim.close()
 
 def data_produce():
     """Main loop: iterate over episodes, generate trajectories, record data.
@@ -1335,7 +1382,7 @@ def data_produce():
     print(f"Success rate: {success_count}/{num_episodes}")
     print(f"Output: {output_dir}")
 
-    sim.close()
+    # sim.close()
 
 
 # 按照规则
@@ -1376,7 +1423,7 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
 
     if mission == "move_up":
         # Phase 1: Approach (move to pre-grasp position above object)
-        pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.cos(yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET + OBJ_H * 2)
+        pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET + OBJ_H * 2)
         # 进行一个旋转 yaw 角度的偏移，确保和物体的朝向一致，增加抓取成功率
         
         
@@ -1397,7 +1444,7 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
         })
     elif mission == "move_down":
         # Phase 2: Descend to grasp position (gripper remains open)
-        grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.cos(yaw), OBJ_H)
+        grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), OBJ_H)
         grasp_traj = sim.isaac_ik_trace(grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "descend",
@@ -1518,6 +1565,7 @@ def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float =
 if __name__ == "__main__":
     # demo_control()
     data_produce()
-
     # 最后关闭
+    print("\n[INFO]: Simulation finished, closing application.")
     simulation_app.close()
+    print("[INFO]: Application closed successfully.")
