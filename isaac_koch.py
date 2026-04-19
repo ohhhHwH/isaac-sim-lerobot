@@ -36,6 +36,7 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg, Camera
+from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, subtract_frame_transforms
 from isaaclab.sim.utils.stage import get_current_stage
@@ -61,7 +62,7 @@ OBJ_Y_RANGE = (0.10, 0.15)    # forward from robot base
 OBJ_Z = 0.015                 # half cube size, sitting on ground
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
-OBJ_L = 0.005
+OBJ_L = 0.01
 OBJ_W = 0.08
 OBJ_H = 0.02
 GRIPPER_OFFSET = 0.02 # 夹爪略微偏一点，静态爪与物体不碰撞
@@ -330,6 +331,20 @@ class SimIsaacModel:
                 update_period=0.0,             # 0.0 表示每个仿真步都更新
                 history_length=6,              # 保存的历史帧数（用于平滑/历史查询）
                 max_contact_data_count_per_prim=32,  # 每个 prim 最多保存多少个接触记录（避免数据溢出）
+                visualizer_cfg=VisualizationMarkersCfg(
+                    prim_path="/Visuals/ContactSensorGripperMove",
+                    markers={
+                        "contact": sim_utils.SphereCfg(
+                            radius=0.012,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.4, 0.0)),
+                        ),
+                        "no_contact": sim_utils.SphereCfg(
+                            radius=0.012,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.8, 0.3)),
+                            visible=False,
+                        ),
+                    },
+                ),
             )
 
             gripper_static_contact_cfg = ContactSensorCfg(
@@ -344,6 +359,20 @@ class SimIsaacModel:
                 update_period=0.0,
                 history_length=6,
                 max_contact_data_count_per_prim=32,
+                visualizer_cfg=VisualizationMarkersCfg(
+                    prim_path="/Visuals/ContactSensorGripperStatic",
+                    markers={
+                        "contact": sim_utils.SphereCfg(
+                            radius=0.010,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.6, 1.0)),
+                        ),
+                        "no_contact": sim_utils.SphereCfg(
+                            radius=0.010,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.8, 1.0)),
+                            visible=False,
+                        ),
+                    },
+                ),
             )
 
             # --- 在 Cube 上放一个传感器，用来观测 Cube 受到夹爪施加的力（便于从被施力对象角度分析） ---
@@ -363,6 +392,20 @@ class SimIsaacModel:
                 update_period=0.0,
                 history_length=6,
                 max_contact_data_count_per_prim=32,
+                visualizer_cfg=VisualizationMarkersCfg(
+                    prim_path="/Visuals/ContactSensorCube",
+                    markers={
+                        "contact": sim_utils.SphereCfg(
+                            radius=0.008,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.7, 0.2, 1.0)),
+                        ),
+                        "no_contact": sim_utils.SphereCfg(
+                            radius=0.008,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.6, 1.0)),
+                            visible=False,
+                        ),
+                    },
+                ),
             )
 
 
