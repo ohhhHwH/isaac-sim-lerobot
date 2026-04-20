@@ -42,7 +42,7 @@ from isaaclab.utils.math import quat_apply, subtract_frame_transforms
 from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
 from isaaclab.sensors import ContactSensorCfg
-
+from isaaclab.assets import SurfaceGripper, SurfaceGripperCfg
 
 import h5py
 import random
@@ -64,14 +64,22 @@ OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
 OBJ_L = 0.01
 OBJ_W = 0.08
-OBJ_H = 0.02
+OBJ_H = 0.04
 GRIPPER_OFFSET = 0.02 # 夹爪略微偏一点，静态爪与物体不碰撞
+
+
+
+# Grasp approach parameters
+PRE_GRASP_HEIGHT_OFFSET = 0.1
+GRIPPER_HEIGHT = 0.1 # 夹爪略微高一点，增加稳定性
+LIFT_HEIGHT = 0.15
 
 # Gripper joint values
 
 GRIPPER_OPEN = -1.0
-GRIPPER_GRASP = 0
+GRIPPER_GRASP = -0.2
 GRIPPER_CLOSED = 0.0
+
 
 # Trajectory interpolation
 STEPS_PER_PHASE = 60
@@ -86,10 +94,7 @@ CAM_ROT = (0.766, -0.643, 0, 0) # 四元数 (w, x, y, z)，测试为正好看到
 # Place target
 PLACE_POS = (0.05, 0.15, 0.05)
 
-# Grasp approach parameters
-PRE_GRASP_HEIGHT_OFFSET = 0.1
-PRE_GRASP_HEIGHT_OFFSET = 0.06
-LIFT_HEIGHT = 0.15
+
 
 # Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
 _JOINT_CHAIN = [
@@ -198,11 +203,11 @@ class SimIsaacModel:
                 ),
                 "gripper": ImplicitActuatorCfg(
                     joint_names_expr=["joint_gripper"], # gripper joint
-                    effort_limit_sim=10,   # 限制更小的力矩
+                    effort_limit_sim=20,   # 限制更小的力矩
                     # 关键：低刚度 + 高阻尼 = 柔顺控制，允许夹爪在接触时有一定的顺应性，减少对物体的冲击和震荡，提高抓取成功率
                     stiffness=200.0,          # 0 → 夹爪不被位置伺服强制到目标（变得顺从/合规）
                     damping=120,            # 小阻尼避免完全失控震荡
-                ),
+                )
             },
         )
 
@@ -409,18 +414,31 @@ class SimIsaacModel:
             )
 
 
+
         self._scene_cfg_class = _SceneCfg
 
         # 初始化仿真
         sim_cfg = sim_utils.SimulationCfg(device=args_cli.device if hasattr(args_cli, 'device') and args_cli.device else "cuda:0")
+        # sim_cfg = sim_utils.SimulationCfg(device="cpu")
+        
+        
         self._sim = sim_utils.SimulationContext(sim_cfg)
         self._sim.set_camera_view([0.5, 0.5, 0.5], [0.0, 0.0, 0.15])
         scene_cfg = self._scene_cfg_class(num_envs=1, env_spacing=2.0)
         self._scene = InteractiveScene(scene_cfg)
         self._sim.reset()
 
-        
 
+        # gripper_move = SurfaceGripperCfg(
+        #     prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",  # 夹爪在场景中的路径表达式
+        #     max_grip_distance=0.1,  # 最大夹持距离（米），夹爪与物体表面最大允许距离
+        #     shear_force_limit=500.0,  # 剪切力极限（牛顿），超过此力夹爪会松开
+        #     coaxial_force_limit=500.0,  # 轴向力极限（牛顿），超过此力夹爪会松开
+        #     retry_interval=0.2,  # 夹爪尝试重新夹持的时间间隔（秒）
+        # )
+        # gripper = SurfaceGripper(gripper_move)
+        # self._scene.surface_grippers["gripper"] = gripper
+        
 
         # 初始化视口和相机系统
         self._viewport = get_viewport_from_window_name("Viewport")
@@ -1466,7 +1484,7 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
 
     if mission == "move_up":
         # Phase 1: Approach (move to pre-grasp position above object)
-        pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET + OBJ_H * 2)
+        pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET)
         # 进行一个旋转 yaw 角度的偏移，确保和物体的朝向一致，增加抓取成功率
         
         
@@ -1487,7 +1505,7 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
         })
     elif mission == "move_down":
         # Phase 2: Descend to grasp position (gripper remains open)
-        grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), OBJ_H)
+        grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + GRIPPER_HEIGHT)
         grasp_traj = sim.isaac_ik_trace(grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "descend",
@@ -1500,13 +1518,13 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
         joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()
         phases.append({
             "name": "close_gripper",
-            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
+            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE * 2)],
             "gripper": GRIPPER_GRASP,
         })
     elif mission == "lift_up":
         # Phase 4: Lift object up
         # Based on the final waypoint of Phase 3 (which is same as Phase 2's end position)
-        lift_pos = (object_pos[0] , object_pos[1] , max(LIFT_HEIGHT, grasp_height + PRE_GRASP_HEIGHT_OFFSET))
+        lift_pos = (object_pos[0] , object_pos[1] , grasp_height + LIFT_HEIGHT)
         lift_traj = sim.isaac_ik_trace(lift_pos, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "lift",
