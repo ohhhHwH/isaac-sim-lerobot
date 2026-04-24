@@ -90,3 +90,5 @@ python isaac_kocj.py
 
 ADD Multi-view port - def add_viewport(self, view_name):
 
+
+source/leisaac/leisaac/tasks/template/lekiwi_env_cfg.py 中 L53 的 TiledCameraCfg

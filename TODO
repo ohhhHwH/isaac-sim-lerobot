@@ -1,0 +1,6 @@
+
+
+#替换so101 USD中关节名和位置和材质 - 不行尝试两次不成功
+#TODO:代码每个关节复现 so101 关节和材质 - 以保持物理属性的一致性 - 每个关节均手动设置 - 以导入的模型进行检查
+#TODO: isaacsim 导入URDF 添加 USD
+#TODO: WINDOWS->Example->robotics examples->hello world

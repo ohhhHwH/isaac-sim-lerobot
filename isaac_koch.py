@@ -47,14 +47,14 @@ from isaaclab.assets import SurfaceGripper, SurfaceGripperCfg
 import h5py
 import random
 
-DEBUG_MODE = True  # 调试模式
+DEBUG_MODE = False  # 调试模式
 # 启用后方块位置固定
 
 # --- 常量配置 ---
-URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urdf", "koch.urdf")
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "urdf", "koch.urdf")
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint_gripper"]
 ANGLE_STEP = 0.05  # 每次按键旋转弧度 (~2.9°)
-NUM_EXPISODES = 2
+NUM_EXPISODES = 5
 
 # Object randomization ranges (from data_produce.py)
 OBJ_X_RANGE = (-0.05, 0.05)   # left-right (narrow, centered)
@@ -62,22 +62,34 @@ OBJ_Y_RANGE = (0.10, 0.15)    # forward from robot base
 OBJ_Z = 0.015                 # half cube size, sitting on ground
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
+# OBJ_L = 0.02
+# OBJ_W = 0.04
+# OBJ_H = 0.02
+
 OBJ_L = 0.01
 OBJ_W = 0.08
 OBJ_H = 0.04
-GRIPPER_OFFSET = 0.02 # 夹爪略微偏一点，静态爪与物体不碰撞
 
+
+OBJ_PX = 1
+OBJ_PY = 0.15
+OBJ_PZ = OBJ_Z
+
+OBJ_P2X = 0
+OBJ_P2Y = 0.15
+OBJ_P2Z = OBJ_Z
 
 
 # Grasp approach parameters
+GRIPPER_OFFSET = 0 # 夹爪略微偏一点，静态爪与物体不碰撞
 PRE_GRASP_HEIGHT_OFFSET = 0.1
-GRIPPER_HEIGHT = 0.1 # 夹爪略微高一点，增加稳定性
-LIFT_HEIGHT = 0.15
+GRIPPER_HEIGHT = OBJ_H * 2.25 # 夹爪略微高一点，增加稳定性
+LIFT_HEIGHT = 0.1
 
 # Gripper joint values
 
 GRIPPER_OPEN = -1.0
-GRIPPER_GRASP = -0.2
+GRIPPER_GRASP = -0.5
 GRIPPER_CLOSED = 0.0
 
 
@@ -178,55 +190,92 @@ class SimIsaacModel:
                     drive_type="force", # 使用力控制，配合 PD 增益实现位置控制
                     target_type="position", # 目标为位置
                     gains=sim_utils.UrdfFileCfg.JointDriveCfg.PDGainsCfg( # 默认 PD 增益，后续可通过 toggle_stable_mode 调整
-                        stiffness=400.0, # 刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
-                        damping=40.0, # 阻尼，较高值可减少震荡但可能导致响应变慢
+                        stiffness=100.0, # 刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
+                        damping=1.0, # 阻尼，较高值可减少震荡但可能导致响应变慢
                     ),
                 ),
-                articulation_props=sim_utils.ArticulationRootPropertiesCfg( # 机械臂根部属性
-                    enabled_self_collisions=True, # 启用自碰撞，防止机械臂自身穿透
-                    solver_position_iteration_count=8, # 增加迭代次数提高稳定性，减少震荡
-                    solver_velocity_iteration_count=0, # 速度迭代通常不需要，保持默认
+                articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                    enabled_self_collisions=True,
+                    solver_position_iteration_count=16,  # 提高：夹爪接触求解更精确
+                    solver_velocity_iteration_count=8,
+                    fix_root_link=True,
                 ),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg( # 刚体属性
-                    disable_gravity=False, # 启用重力
-                    max_depenetration_velocity=5.0, # 限制最大分离速度，防止穿透后弹出过快导致不稳定
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=False,
+                    max_depenetration_velocity=1.0,  # 与物体一致，防止弹出
                 ),
             ),
             init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)), # 初始位置
             actuators={
-                "all_joints": ImplicitActuatorCfg( # 统一配置所有关节的 actuator，方便后续调整 PD 增益实现稳定模式切换
-                    joint_names_expr=["joint[1-5]"], # 匹配所有关节
-                    effort_limit_sim=5.0, # 仿真中的力矩限制，过高可能导致不稳定，过低可能无法驱动机械臂
-                    velocity_limit_sim=5.0, # 仿真中的速度限制，过高可能导致不稳定，过低可能导致响应变慢
-                    stiffness=400.0, # 默认刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
-                    damping=60.0, # 默认阻尼，较高值可减少震荡但可能导致响应变慢
+                "joint1": ImplicitActuatorCfg( # Rotation — 基座关节，需要最高刚度
+                    joint_names_expr=["joint1"],
+                    effort_limit_sim=20.0,
+                    velocity_limit_sim=5.0,
+                    stiffness=400.0,
+                    damping=40.0,
                 ),
-                "gripper": ImplicitActuatorCfg(
-                    joint_names_expr=["joint_gripper"], # gripper joint
-                    effort_limit_sim=20,   # 限制更小的力矩
-                    # 关键：低刚度 + 高阻尼 = 柔顺控制，允许夹爪在接触时有一定的顺应性，减少对物体的冲击和震荡，提高抓取成功率
-                    stiffness=200.0,          # 0 → 夹爪不被位置伺服强制到目标（变得顺从/合规）
-                    damping=120,            # 小阻尼避免完全失控震荡
+                "joint2": ImplicitActuatorCfg( # Pitch — 承重关节，需抗重力
+                    joint_names_expr=["joint2"],
+                    effort_limit_sim=20.0,
+                    velocity_limit_sim=5.0,
+                    stiffness=400.0,
+                    damping=40.0,
+                ),
+                "joint3": ImplicitActuatorCfg( # Elbow — 中段关节
+                    joint_names_expr=["joint3"],
+                    effort_limit_sim=15.0,
+                    velocity_limit_sim=5.0,
+                    stiffness=200.0,
+                    damping=20.0,
+                ),
+                "joint4": ImplicitActuatorCfg( # Wrist_Pitch
+                    joint_names_expr=["joint4"],
+                    effort_limit_sim=10.0,
+                    velocity_limit_sim=5.0,
+                    stiffness=100.0,
+                    damping=10.0,
+                ),
+                "joint5": ImplicitActuatorCfg( # Wrist_Roll
+                    joint_names_expr=["joint5"],
+                    effort_limit_sim=10.0,
+                    velocity_limit_sim=5.0,
+                    stiffness=100.0,
+                    damping=10.0,
+                ),
+                "gripper": ImplicitActuatorCfg( # Jaw — 夹爪需要柔顺但足够到位
+                    joint_names_expr=["joint_gripper"],
+                    effort_limit_sim=5.0,
+                    stiffness=50.0,
+                    damping=5.0,
                 )
             },
+            soft_joint_pos_limit_factor=1.0, # 软限制因子，允许关节在物理极限附近有一定的超出空间，避免过早触发硬限制导致不稳定
+        )
+        
+        self.OBJ_CFG = AssetBaseCfg(
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=os.path.join(os.path.dirname(__file__), "assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd"),
+                scale=(0.5, 0.5, 0.5),
+            ),
+            # 配置质量
+
+            init_state=ArticulationCfg.InitialStateCfg(pos=(OBJ_P2X, OBJ_P2Y, OBJ_P2Z)), # 初始位置
         )
 
         # 抓取物体属性配置
         # 刚体属性配置
         self._obj_rigid_props = sim_utils.RigidBodyPropertiesCfg(
-                        linear_damping=1.0,      # 线性阻尼：减少平移运动的晃动
-                        angular_damping=1.0,     # 角阻尼：减少旋转运动的晃动
-                        max_linear_velocity=1.0, # 最大线速度限制 (m/s)
-                        max_angular_velocity=57.3, # 最大角速度限制 (deg/s) ≈ 1 rad/s
-                        disable_gravity=False,   # 启用重力
-                        kinematic_enabled=False,      # 是否为运动学物体
-                        
-                        # 高级稳定性参数
-                        max_depenetration_velocity=10.0,  # 最大分离速度，防止穿透后弹出
-                        solver_position_iteration_count=4,  # 位置求解迭代次数
-                        solver_velocity_iteration_count=1,  # 速度求解迭代次数
-                        sleep_threshold=0.005,        # 休眠阈值，低于此速度进入休眠节省计算
-                        stabilization_threshold=0.001, # 稳定化阈值
+                        linear_damping=2.0,
+                        angular_damping=2.0,
+                        max_linear_velocity=1.0,
+                        max_angular_velocity=57.3,
+                        disable_gravity=False,
+                        kinematic_enabled=False,
+                        max_depenetration_velocity=1.0,  # 降低：防止穿透后弹飞
+                        solver_position_iteration_count=16,  # 提高：更精确的接触求解
+                        solver_velocity_iteration_count=4,
+                        sleep_threshold=0.005,
+                        stabilization_threshold=0.001,
                     )
         # 质量属性配置
         self._obj_mass_props=sim_utils.MassPropertiesCfg(
@@ -235,24 +284,18 @@ class SimIsaacModel:
         )
         # 碰撞属性配置 - 关键参数用于提高抓取成功率
         self._obj_collision_props=sim_utils.CollisionPropertiesCfg(
-            contact_offset=0.005,    # 接触偏移 (m)：碰撞检测开始的距离
-            rest_offset=0.001,         # 静止偏移 (m)：物体静止时的间隙，0表示紧密接触
-            torsional_patch_radius=0.04,  # 扭转摩擦接触半径 (m)
-            min_torsional_patch_radius=0.01, # 最小扭转摩擦半径 (m)
-            
-            # 高级碰撞参数
-            # collision_enabled=True,      # 是否启用碰撞（默认True）
+            contact_offset=0.002,    # 必须远小于物体最薄维度(1cm)的一半
+            rest_offset=0.0,         # 零间隙，紧密接触
+            torsional_patch_radius=0.04,
+            min_torsional_patch_radius=0.01,
         )
         # 物理材质属性 - 高摩擦低弹性，便于抓取
         self._obj_physics_material=sim_utils.RigidBodyMaterialCfg(
-            static_friction=100,     # 静摩擦系数：物体静止时的摩擦力，越大越不易滑动
-            dynamic_friction=80,    # 动摩擦系数：物体运动时的摩擦力
-            restitution=0,         # 弹性系数：0表示完全非弹性碰撞（不反弹）
-            friction_combine_mode="multiply",  # 摩擦力组合模式：multiply表示相乘
-            restitution_combine_mode="min",    # 弹性组合模式：min表示取最小值
-            # 高级摩擦参数
-            # friction_restitute=0.0,      # 摩擦恢复
-            # improve_patch_friction=True,  # 改进接触面摩擦计算
+            static_friction=1.5,     # 合理范围：橡胶~1.0-2.0
+            dynamic_friction=1.0,
+            restitution=0,
+            friction_combine_mode="average",  # average 更稳定，避免 multiply 导致极端值
+            restitution_combine_mode="max",
         )
         # 视觉材质
         self._obj_visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1))
@@ -269,6 +312,8 @@ class SimIsaacModel:
                 spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
             )
             koch = self.KOCH_CFG.replace(prim_path="{ENV_REGEX_NS}/Koch")
+            
+            orange = self.OBJ_CFG.replace(prim_path="{ENV_REGEX_NS}/Orange")
 
             # Target object (dynamic cuboid, will be randomized) 
             # 添加一个物体 摩檫力增大 变成柔体
@@ -287,10 +332,32 @@ class SimIsaacModel:
                     visual_material=self._obj_visual_material
                 ),
                 init_state=RigidObjectCfg.InitialStateCfg(
-                    pos=(0.0, 0.15, OBJ_Z),
+                    pos=(OBJ_PX, OBJ_PY, OBJ_PZ),
                 ),
             )
 
+            # 添加 assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd
+            # orange = RigidObjectCfg(
+            #     prim_path="{ENV_REGEX_NS}/Orange",
+            #     spawn=sim_utils.UsdFileCfg(
+            #         usd_path=os.path.join(os.path.dirname(__file__), "assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd"),
+            #         activate_contact_sensors=True,
+            #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            #             rigid_body_enabled=True,
+            #             max_linear_velocity=1000.0,
+            #             max_angular_velocity=1000.0,
+            #             max_depenetration_velocity=100.0,
+            #             enable_gyroscopic_forces=True,
+            #         ),
+            #         mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
+            #         collision_props=sim_utils.CollisionPropertiesCfg(),
+            #     ),
+            #     init_state=RigidObjectCfg.InitialStateCfg(
+            #         pos=(0.1, 0.15, 0.03),  # 放在cube旁边
+            #     ),
+            # )
+            
+            
             # 挂载在 gripper_static_1 上的相机传感器，严格参考 MuJoCo:
             # <camera name="gripper_cam" pos="0 0.08 0" xyaxes="1 0 0 0 0.8 -0.6"/>
             # 其中 xyaxes 对应旋转矩阵列向量:
@@ -418,8 +485,15 @@ class SimIsaacModel:
         self._scene_cfg_class = _SceneCfg
 
         # 初始化仿真
-        sim_cfg = sim_utils.SimulationCfg(device=args_cli.device if hasattr(args_cli, 'device') and args_cli.device else "cuda:0")
-        # sim_cfg = sim_utils.SimulationCfg(device="cpu")
+        sim_cfg = sim_utils.SimulationCfg(
+            dt=1.0 / 200.0,  # 200Hz：1cm薄物体需要更高频率防穿透
+            device=args_cli.device if hasattr(args_cli, 'device') and args_cli.device else "cuda:0",
+            physx=sim_utils.PhysxCfg(
+                enable_ccd=True,
+                enable_stabilization=True,
+                bounce_threshold_velocity=0.2,
+            ),
+        )
         
         
         self._sim = sim_utils.SimulationContext(sim_cfg)
@@ -427,7 +501,30 @@ class SimIsaacModel:
         scene_cfg = self._scene_cfg_class(num_envs=1, env_spacing=2.0)
         self._scene = InteractiveScene(scene_cfg)
         self._sim.reset()
-
+        
+        
+        # 添加夹爪表面材质
+        gripper_mat_cfg = sim_utils.RigidBodyMaterialCfg(
+            static_friction=2.0,
+            dynamic_friction=1.5,
+            restitution=0.0,
+            friction_combine_mode="average",
+        )
+        # 2) 使用正则路径在每个 env 下生成材质 prim（spawn 函数带 @clone）
+        material_pattern = f"{self._scene.env_regex_ns}/Koch/physicsMaterial_gripper"
+        gripper_mat_cfg.func(material_pattern, gripper_mat_cfg)
+        # 3) 找到每个具体的 gripper_static / gripper_moving prim，然后绑定对应的材质 prim
+        static_paths = sim_utils.find_matching_prim_paths(f"{self._scene.env_regex_ns}/Koch/gripper_static_1")
+        moving_paths = sim_utils.find_matching_prim_paths(f"{self._scene.env_regex_ns}/Koch/gripper_moving_1")
+        # 绑定：对每个具体 prim，材质 prim 路径与其父路径对应
+        for static_path in static_paths:
+            parent = static_path.rsplit("/", 1)[0]  # e.g. /World/envs/env_0/Koch
+            mat_path = f"{parent}/physicsMaterial_gripper"
+            sim_utils.bind_physics_material(static_path, mat_path)
+        for moving_path in moving_paths:
+            parent = moving_path.rsplit("/", 1)[0]
+            mat_path = f"{parent}/physicsMaterial_gripper"
+            sim_utils.bind_physics_material(moving_path, mat_path)
 
         # gripper_move = SurfaceGripperCfg(
         #     prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",  # 夹爪在场景中的路径表达式
@@ -438,7 +535,6 @@ class SimIsaacModel:
         # )
         # gripper = SurfaceGripper(gripper_move)
         # self._scene.surface_grippers["gripper"] = gripper
-        
 
         # 初始化视口和相机系统
         self._viewport = get_viewport_from_window_name("Viewport")
@@ -934,6 +1030,15 @@ class SimIsaacModel:
         # 删除场景中添加的随机物体
         self.remove_random_object()
         
+        # 重置物体位置为初始位置
+        if "cube" in self._scene.keys():
+            cube = self._scene["cube"]
+            initial_pos = torch.tensor([[0.0, 0.15, OBJ_Z]], dtype=torch.float32, device=cube.device) + self._scene.env_origins
+            initial_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=cube.device)
+            cube.write_root_pose_to_sim(torch.cat((initial_pos, initial_quat), dim=1))
+            cube.write_root_velocity_to_sim(torch.zeros((1, 6), dtype=torch.float32, device=cube.device))
+            print("[Object] Reset cube to initial position")
+        
         
     def grasp_open(self):
         """打开夹爪"""
@@ -1372,7 +1477,7 @@ def data_produce():
         filepath = os.path.join(output_dir, f"episode_{ep_idx:06d}.hdf5")
         f = h5py.File(filepath, "w")
 
-        max_steps = STEPS_PER_PHASE * 7
+        max_steps = STEPS_PER_PHASE * 10
         f.create_dataset("action", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32")
         f.create_dataset("observation/images/gripper", shape=(0, CAM_HEIGHT, CAM_WIDTH, 3),
                          maxshape=(max_steps, CAM_HEIGHT, CAM_WIDTH, 3), dtype="uint8")
@@ -1478,35 +1583,31 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
     home_joints = sim._robot.data.default_joint_pos[0, :6].cpu().tolist()
     
     # 根据 object_rot 确定 物体的旋转角度是多少
-    
-    yaw = object_euler[2] 
-    
+
+    yaw = object_euler[2]
+
+    # 选择正反两个旋转方向中角度更小的那个
+    # 将 yaw 归一化到 [-π, π] 范围内
+    yaw = (yaw + math.pi) % (2 * math.pi) - math.pi
+
 
     if mission == "move_up":
         # Phase 1: Approach (move to pre-grasp position above object)
         pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET)
         # 进行一个旋转 yaw 角度的偏移，确保和物体的朝向一致，增加抓取成功率
-        
-        
+
+
         pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "approach",
             "waypoints": pre_grasp_traj,
             "gripper": GRIPPER_OPEN,
         })
-    elif mission == "grasp_open":
-        # 只打开夹爪 位置不改变
-        # 获取 关节角度值
-        joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()  # Get first 6 joints (exclude gripper)
-        phases.append({
-            "name": "grasp_open",
-            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
-            "gripper": GRIPPER_OPEN,
-        })
     elif mission == "move_down":
         # Phase 2: Descend to grasp position (gripper remains open)
+        # 保持 move_up 阶段已设置的旋转角度，不再额外旋转（rot_rad=0 或不传）
         grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + GRIPPER_HEIGHT)
-        grasp_traj = sim.isaac_ik_trace(grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
+        grasp_traj = sim.isaac_ik_trace(grasp_pos, steps=STEPS_PER_PHASE)
         phases.append({
             "name": "descend",
             "waypoints": grasp_traj,
@@ -1518,7 +1619,7 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
         joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()
         phases.append({
             "name": "close_gripper",
-            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE * 2)],
+            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE * 3)],
             "gripper": GRIPPER_GRASP,
         })
     elif mission == "lift_up":
@@ -1537,6 +1638,15 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
             "name": "hold",
             "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE*2)],
             "gripper": GRIPPER_GRASP,
+        })
+    elif mission == "grasp_open":
+        # 只打开夹爪 位置不改变
+        # 获取 关节角度值
+        joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()  # Get first 6 joints (exclude gripper)
+        phases.append({
+            "name": "grasp_open",
+            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
+            "gripper": GRIPPER_OPEN,
         })
     return phases
 
@@ -1621,11 +1731,55 @@ def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float =
     distance = np.linalg.norm(obj_pos - place_pos_np)
 
     return bool(distance < threshold and obj_pos[2] >= OBJ_Z * 0.8)
+
+    
+def demo_remote_control():
+    # 连接 upd 传输
+    # 192.168.2.2:3456 从这个端口中接收数据
+    # 接受该端口发送的 关节角度数据,写入到仿真中的目标关节位置
+    import socket
+    import json
+    IP = "0.0.0.0"
+    PORT = 3456
+    
+    
+    # 初始化模拟器
+    sim = SimIsaacModel(URDF_PATH)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((IP, PORT))
+    print(f"Listening on {IP}:{PORT} ...")
+    kb = KeyboardController()
+    kb.start()
+    while simulation_app.is_running():
+        data, addr = sock.recvfrom(4096)  # 接收数据
+        try:
+            msg = json.loads(data.decode("utf-8"))
+            # print(f"Received from {addr}: {msg}")
+            # {'rad_angles': [0.4141748127291231, 0.5890486225480862, 0.2853204265467293, 0.37429131224409645, -0.05062136600022616, -0.1349721288208946]}
+            # 处理msg
+            joint_angles = msg["rad_angles"]
+            print(f"Joint angles: {joint_angles}")
+            
+            # 将关节角度写入仿真
+            target = torch.tensor(joint_angles, dtype=torch.float32, device=sim._sim.device)
+            sim._target_pos[0] = target
+            sim.step()
+            
+            # TODO 当输入 R 时重置 cube 位置
+            if kb.on_press("R"):
+                sim.reset()
+                print("[INFO]: Reset all joints to default position")
+            
+        except Exception as e:
+            print(f"Error decoding message: {e}")
+    kb.stop()
     
 
 if __name__ == "__main__":
     # demo_control()
-    data_produce()
+    # data_produce()
+    demo_remote_control()
     # 最后关闭
     print("\n[INFO]: Simulation finished, closing application.")
     simulation_app.close()

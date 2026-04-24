@@ -20,6 +20,10 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 from pxr import Usd
+
+
+# 需要 isaaclab_arena 包目录下运行
+
 from isaaclab_arena.utils.usd_helpers import open_stage, get_all_prims, get_prim_depth, is_articulation_root, is_rigid_body
 from isaaclab_arena.utils.usd_pose_helpers import get_prim_pose_in_default_prim_frame
 from isaaclab_arena.assets.object_utils import detect_object_type
@@ -309,70 +313,43 @@ def extract_rigidobject_cfgs(stage):
         cfgs.append(cfg)
 
     return cfgs
+usd_paths = [
+    "urdf/ref/so_100.usd",
+    "urdf/ref/so100.usd",
+    "urdf/ref/task_cube.usd",
+    ]
+for usd_path in usd_paths:
+    out_path = usd_path + ".inspect.yaml"
+    with open_stage(usd_path) as stage:
+        data = inspect_stage(stage)
+    with open(out_path, "w", encoding="utf-8") as f:
+        if yaml is not None:
+            yaml.safe_dump(data, f, indent=2, allow_unicode=True, sort_keys=False)
+        else:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"Wrote inspection YAML to: {out_path}")
 
-usd_path = "usd/power_drill_physics.usd"
-out_path = usd_path + ".inspect.yaml"
-with open_stage(usd_path) as stage:
-    data = inspect_stage(stage)
-with open(out_path, "w", encoding="utf-8") as f:
-    if yaml is not None:
-        yaml.safe_dump(data, f, indent=2, allow_unicode=True, sort_keys=False)
-    else:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-print(f"Wrote inspection YAML to: {out_path}")
+    # 额外：提取几何/物理属性并保存
+    physics_out = usd_path + ".physics.yaml"
+    with open_stage(usd_path) as stage:
+        phys_data = extract_physics_properties(stage)
+    with open(physics_out, "w", encoding="utf-8") as f:
+        if yaml is not None:
+            yaml.safe_dump(phys_data, f, indent=2, allow_unicode=True, sort_keys=False)
+        else:
+            json.dump(phys_data, f, indent=2, ensure_ascii=False)
+    print(f"Wrote physics YAML to: {physics_out}")
 
-# 额外：提取几何/物理属性并保存
-physics_out = usd_path + ".physics.yaml"
-with open_stage(usd_path) as stage:
-    phys_data = extract_physics_properties(stage)
-with open(physics_out, "w", encoding="utf-8") as f:
-    if yaml is not None:
-        yaml.safe_dump(phys_data, f, indent=2, allow_unicode=True, sort_keys=False)
-    else:
-        json.dump(phys_data, f, indent=2, ensure_ascii=False)
-print(f"Wrote physics YAML to: {physics_out}")
-
-# 提取 RigidObjectCfg 风格配置并保存
-rigid_out = usd_path + ".rigid_cfgs.yaml"
-with open_stage(usd_path) as stage:
-    rigid_data = extract_rigidobject_cfgs(stage)
-with open(rigid_out, "w", encoding="utf-8") as f:
-    if yaml is not None:
-        yaml.safe_dump(rigid_data, f, indent=2, allow_unicode=True, sort_keys=False)
-    else:
-        json.dump(rigid_data, f, indent=2, ensure_ascii=False)
-print(f"Wrote rigid cfgs YAML to: {rigid_out}")
-
-usd_path = "usd/GR1T2_fourier_hand_6dof.usd"
-out_path = usd_path + ".inspect.yaml"
-with open_stage(usd_path) as stage:
-    data = inspect_stage(stage)
-with open(out_path, "w", encoding="utf-8") as f:
-    if yaml is not None:
-        yaml.safe_dump(data, f, indent=2, allow_unicode=True, sort_keys=False)
-    else:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-print(f"Wrote inspection YAML to: {out_path}")
-
-physics_out = usd_path + ".physics.yaml"
-with open_stage(usd_path) as stage:
-    phys_data = extract_physics_properties(stage)
-with open(physics_out, "w", encoding="utf-8") as f:
-    if yaml is not None:
-        yaml.safe_dump(phys_data, f, indent=2, allow_unicode=True, sort_keys=False)
-    else:
-        json.dump(phys_data, f, indent=2, ensure_ascii=False)
-print(f"Wrote physics YAML to: {physics_out}")
-
-rigid_out = usd_path + ".rigid_cfgs.yaml"
-with open_stage(usd_path) as stage:
-    rigid_data = extract_rigidobject_cfgs(stage)
-with open(rigid_out, "w", encoding="utf-8") as f:
-    if yaml is not None:
-        yaml.safe_dump(rigid_data, f, indent=2, allow_unicode=True, sort_keys=False)
-    else:
-        json.dump(rigid_data, f, indent=2, ensure_ascii=False)
-print(f"Wrote rigid cfgs YAML to: {rigid_out}")
+    # 提取 RigidObjectCfg 风格配置并保存
+    rigid_out = usd_path + ".rigid_cfgs.yaml"
+    with open_stage(usd_path) as stage:
+        rigid_data = extract_rigidobject_cfgs(stage)
+    with open(rigid_out, "w", encoding="utf-8") as f:
+        if yaml is not None:
+            yaml.safe_dump(rigid_data, f, indent=2, allow_unicode=True, sort_keys=False)
+        else:
+            json.dump(rigid_data, f, indent=2, ensure_ascii=False)
+    print(f"Wrote rigid cfgs YAML to: {rigid_out}")
 
 
 # 最后关闭

@@ -4,3 +4,6 @@
 [submodule "isaacsim"]
 	path = isaacsim
 	url = https://github.com/isaac-sim/IsaacSim.git
+[submodule "assets/piper_isaac_sim"]
+	path = assets/piper_isaac_sim
+	url = https://github.com/agilexrobotics/piper_isaac_sim.git

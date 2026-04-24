@@ -3,6 +3,7 @@
 *.exe
 temp/*
 datasets/*
+assets/*
 
 prompt.md
 test.py
