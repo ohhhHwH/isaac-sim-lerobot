@@ -7,3 +7,6 @@
 [submodule "assets/piper_isaac_sim"]
 	path = assets/piper_isaac_sim
 	url = https://github.com/agilexrobotics/piper_isaac_sim.git
+[submodule "ref/Agilex-College"]
+	path = ref/Agilex-College
+	url = https://github.com/agilexrobotics/Agilex-College.git

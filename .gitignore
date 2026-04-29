@@ -1,9 +1,13 @@
 #全局忽略
 *.pdf
 *.exe
+*.pyc
+
 temp/*
 datasets/*
 assets/*
 
 prompt.md
 test.py
+CMD
+

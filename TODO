@@ -1,5 +1,4 @@
-
-
+#TODO FEAT: 模拟相机与真实相机校准
 #替换so101 USD中关节名和位置和材质 - 不行尝试两次不成功
 #代码每个关节复现 so101 关节和材质 - 以保持物理属性的一致性 - 每个关节均手动设置 - 以导入的模型进行检查
 #isaacsim 导入URDF 添加 USD
@@ -20,3 +19,6 @@
   File "/home/hyl/miniconda3/envs/env_isaaclab/lib/python3.11/site-packages/isaacsim/extscache/omni.replicator.core-1.12.27+107.3.3.lx64.r.cp311/omni/replicator/core/scripts/create.py", line 1561, in attach_render_products
     raise ValueError("No valid sensor paths provided")
 
+#TODO: FIND A WAY 比较好的控制模拟piper的方法
+    # TODO 参考 https://github.com/agilexrobotics/Agilex-College - 控制
+    # TODO 修改  位姿 控制逻辑再次尝试
