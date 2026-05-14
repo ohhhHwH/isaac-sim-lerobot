@@ -597,6 +597,17 @@ class SimIsaacModel:
         self._scene.write_data_to_sim()
         self._sim.step()
         self._scene.update(self._sim_dt)
+    
+    # 根据末端位姿设定机械臂姿态
+    def set_arm_pose(self, target_pos, target_rot, gripper_ang=None):
+        # target_pos = pos(3)
+        # target_rot = quat(w,x,y,z)(4)
+        # TODO 先不设置夹爪开合
+        pos = self.isaac_ik_trace(target_pos, target_rot, steps=1)
+        target = torch.tensor(pos[0], dtype=torch.float32, device=self._sim.device)
+        target[5] = gripper_ang if gripper_ang is not None else self._target_pos[0, 5] # 保持当前夹爪状态
+        self.set_joint_angles(target)
+        
 
     # 获取当前关节角度列表，单位为弧度
     def get_joint_angles(self, joint_angles=None):
@@ -929,65 +940,6 @@ class SimIsaacModel:
 
         return trajectory
 
-    # ik 逆运动学控制器接口，输入末端位姿（位置 + 旋转），输出关节角度
-    def joint_poses_to_angles_to(self, target_poses)->dict:
-        """
-        逆运动学：根据末端位姿计算关节角度。
-
-        Parameters
-        ----------
-        target_poses : dict
-            目标位姿，格式同 joint_angles_to_poses 输出。
-
-        Returns
-        -------
-        dict
-            {
-                'success': bool,  # 是否成功找到解
-                'joint_angles': list[float],  # 关节角度列表（弧度），长度与 model.nq 一致
-            }
-        """
-        target_pos = target_poses['last_joint']['pos']
-        target_quat = target_poses['last_joint']['quat']
-
-        # 使用数值雅可比迭代 IK
-        q = self._robot.data.joint_pos[0].clone().cpu().float()
-        target = torch.tensor(target_pos, dtype=torch.float32)
-        num_arm_joints = 5
-        eps = 1e-4
-        max_iter = 200
-        tol = 0.001
-        damping = 0.01
-        lr = 0.5
-
-        for iteration in range(max_iter):
-            T = _make_fk(q.tolist(), up_to_joint=5)
-            ee_pos = T[:3, 3]
-            error = target - ee_pos
-
-            if error.norm().item() < tol:
-                return {
-                    'success': True,
-                    'joint_angles': q.tolist(),
-                }
-
-            # 数值雅可比 (3 x 5)
-            J = torch.zeros(3, num_arm_joints)
-            for j in range(num_arm_joints):
-                q_pert = q.clone()
-                q_pert[j] += eps
-                T_pert = _make_fk(q_pert.tolist(), up_to_joint=5)
-                J[:, j] = (T_pert[:3, 3] - ee_pos) / eps
-
-            # 阻尼最小二乘: dq = J^T (J J^T + λI)^{-1} error
-            JJT = J @ J.T + damping * torch.eye(3)
-            dq = J.T @ torch.linalg.solve(JJT, error)
-            q[:num_arm_joints] += lr * dq
-
-        return {
-            'success': False,
-            'joint_angles': q.tolist(),
-        }
 
     def contact_sensor_infor(self):
         # print information from the sensors
@@ -1732,6 +1684,7 @@ def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float =
 
     return bool(distance < threshold and obj_pos[2] >= OBJ_Z * 0.8)
 
+CONTROL_MODE = "tor"
     
 def demo_remote_control():
     # 连接 upd 传输
@@ -1755,16 +1708,26 @@ def demo_remote_control():
         data, addr = sock.recvfrom(4096)  # 接收数据
         try:
             msg = json.loads(data.decode("utf-8"))
-            # print(f"Received from {addr}: {msg}")
-            # {'rad_angles': [0.4141748127291231, 0.5890486225480862, 0.2853204265467293, 0.37429131224409645, -0.05062136600022616, -0.1349721288208946]}
-            # 处理msg
-            joint_angles = msg["rad_angles"]
-            print(f"Joint angles: {joint_angles}")
             
-            # 将关节角度写入仿真
-            target = torch.tensor(joint_angles, dtype=torch.float32, device=sim._sim.device)
-            sim._target_pos[0] = target
-            sim.step()
+            if CONTROL_MODE == "tor":
+                pos = msg.get("position") or msg.get("pos")
+                rot = msg.get("orientation") or msg.get("quat")
+                gripper_angle = msg["gripper_angle"]
+                # "position": pos, "orientation": quat, "gripper_angle": gripper_angle
+                pos_t = torch.as_tensor([pos], dtype=torch.float32)
+                rot_t = torch.as_tensor([rot], dtype=torch.float32)
+                sim.set_arm_pose(pos_t, rot_t, gripper_ang=gripper_angle)
+            else:
+                # print(f"Received from {addr}: {msg}")
+                # {'rad_angles': [0.4141748127291231, 0.5890486225480862, 0.2853204265467293, 0.37429131224409645, -0.05062136600022616, -0.1349721288208946]}
+                # 处理msg
+                joint_angles = msg["rad_angles"]
+                print(f"Joint angles: {joint_angles}")
+            
+                # 将关节角度写入仿真
+                target = torch.tensor(joint_angles, dtype=torch.float32, device=sim._sim.device)
+                sim._target_pos[0] = target
+                sim.step()
             
             # TODO 当输入 R 时重置 cube 位置
             if kb.on_press("R"):

@@ -2,10 +2,12 @@
 *.pdf
 *.exe
 *.pyc
+*.usd
+*.yaml
 
 temp/*
 datasets/*
-assets/*
+# assets/*
 
 prompt.md
 test.py
