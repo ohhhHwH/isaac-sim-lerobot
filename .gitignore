@@ -4,6 +4,8 @@
 *.pyc
 *.usd
 *.yaml
+*.pid
+*.log
 
 temp/*
 datasets/*

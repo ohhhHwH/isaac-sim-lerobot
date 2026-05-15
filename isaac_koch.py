@@ -51,25 +51,27 @@ DEBUG_MODE = False  # 调试模式
 # 启用后方块位置固定
 
 # --- 常量配置 ---
-URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "urdf", "koch.urdf")
+URDF_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "assets", "urdf", "koch.urdf"
+)
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint_gripper"]
 ANGLE_STEP = 0.05  # 每次按键旋转弧度 (~2.9°)
 NUM_EXPISODES = 5
 
 # Object randomization ranges (from data_produce.py)
-OBJ_X_RANGE = (-0.05, 0.05)   # left-right (narrow, centered)
-OBJ_Y_RANGE = (0.10, 0.15)    # forward from robot base
-OBJ_Z = 0.015                 # half cube size, sitting on ground
+OBJ_X_RANGE = (-0.05, 0.05)  # left-right (narrow, centered)
+OBJ_Y_RANGE = (0.10, 0.15)  # forward from robot base
 OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
 # OBJ_L = 0.02
 # OBJ_W = 0.04
 # OBJ_H = 0.02
 
-OBJ_L = 0.01
+OBJ_L = 0.02
 OBJ_W = 0.08
 OBJ_H = 0.04
 
+OBJ_Z = OBJ_H / 2  # half cube size, sitting on ground
 
 OBJ_PX = 1
 OBJ_PY = 0.15
@@ -81,15 +83,15 @@ OBJ_P2Z = OBJ_Z
 
 
 # Grasp approach parameters
-GRIPPER_OFFSET = 0 # 夹爪略微偏一点，静态爪与物体不碰撞
+GRIPPER_OFFSET = 0.05  # 夹爪略微偏一点，静态爪与物体不碰撞
 PRE_GRASP_HEIGHT_OFFSET = 0.1
-GRIPPER_HEIGHT = OBJ_H * 2.25 # 夹爪略微高一点，增加稳定性
+GRIPPER_HEIGHT = OBJ_H * 1.3  # 夹爪略微高一点，增加稳定性
 LIFT_HEIGHT = 0.1
 
 # Gripper joint values
 
 GRIPPER_OPEN = -1.0
-GRIPPER_GRASP = -0.5
+GRIPPER_GRASP = -0.2
 GRIPPER_CLOSED = 0.0
 
 
@@ -100,27 +102,32 @@ STEPS_PER_PHASE = 60
 CAM_WIDTH = 640
 CAM_HEIGHT = 480
 CAM_POS = (0.0, 0.2, 0.0)
-CAM_ROT = (0.766, -0.643, 0, 0) # 四元数 (w, x, y, z)，测试为正好看到夹爪 (x:-80,y:0,z:0)
+CAM_ROT = (
+    0.766,
+    -0.643,
+    0,
+    0,
+)  # 四元数 (w, x, y, z)，测试为正好看到夹爪 (x:-80,y:0,z:0)
 
 
 # Place target
 PLACE_POS = (0.05, 0.15, 0.05)
 
 
-
 # Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
 _JOINT_CHAIN = [
-    ((0.0, 0.0, 0.039),              'z',  1),   # joint1: base yaw
-    ((-0.0002, 0.0, 0.0173),         'x', -1),   # joint2: shoulder pitch
-    ((0.00025, 0.014791, 0.108347),   'x',  1),   # joint3: elbow pitch
-    ((0.000125, 0.090467, 0.002747),  'x',  1),   # joint4: wrist pitch
-    ((0.001353, 0.000007, -0.045),    'z', -1),   # joint5: wrist roll
-    ((-0.0074, -0.00025, -0.01315),   'y', -1),   # joint_gripper
+    ((0.0, 0.0, 0.039), "z", 1),  # joint1: base yaw
+    ((-0.0002, 0.0, 0.0173), "x", -1),  # joint2: shoulder pitch
+    ((0.00025, 0.014791, 0.108347), "x", 1),  # joint3: elbow pitch
+    ((0.000125, 0.090467, 0.002747), "x", 1),  # joint4: wrist pitch
+    ((0.001353, 0.000007, -0.045), "z", -1),  # joint5: wrist roll
+    ((-0.0074, -0.00025, -0.01315), "y", -1),  # joint_gripper
 ]
 
 
 class KeyboardController:
     """键盘控制器，使用监听按键状态"""
+
     def __init__(self):
         self._key_states = {}
         self._appwindow = None
@@ -131,7 +138,10 @@ class KeyboardController:
     def _on_keyboard_event(self, event, *args, **kwargs):
         """carb 键盘事件回调"""
         key_name = event.input if isinstance(event.input, str) else event.input.name
-        if event.type in (carb.input.KeyboardEventType.KEY_PRESS, carb.input.KeyboardEventType.KEY_REPEAT):
+        if event.type in (
+            carb.input.KeyboardEventType.KEY_PRESS,
+            carb.input.KeyboardEventType.KEY_REPEAT,
+        ):
             self._key_states[key_name] = True
         elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
             self._key_states[key_name] = False
@@ -163,7 +173,11 @@ class KeyboardController:
 
     def stop(self):
         """停止监听键盘事件"""
-        if self._sub is not None and self._input_iface is not None and self._keyboard is not None:
+        if (
+            self._sub is not None
+            and self._input_iface is not None
+            and self._keyboard is not None
+        ):
             self._input_iface.unsubscribe_to_keyboard_events(self._keyboard, self._sub)
             self._sub = None
 
@@ -184,14 +198,14 @@ class SimIsaacModel:
         self.KOCH_CFG = ArticulationCfg(
             spawn=sim_utils.UrdfFileCfg(
                 asset_path=URDF_PATH,
-                activate_contact_sensors=True, # 启用 sensors
-                fix_base=True,# 固定底座
-                joint_drive=sim_utils.UrdfFileCfg.JointDriveCfg( # 默认使用力控制，配合 PD 增益实现位置控制
-                    drive_type="force", # 使用力控制，配合 PD 增益实现位置控制
-                    target_type="position", # 目标为位置
-                    gains=sim_utils.UrdfFileCfg.JointDriveCfg.PDGainsCfg( # 默认 PD 增益，后续可通过 toggle_stable_mode 调整
-                        stiffness=100.0, # 刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
-                        damping=1.0, # 阻尼，较高值可减少震荡但可能导致响应变慢
+                activate_contact_sensors=True,  # 启用 sensors
+                fix_base=True,  # 固定底座
+                joint_drive=sim_utils.UrdfFileCfg.JointDriveCfg(  # 默认使用力控制，配合 PD 增益实现位置控制
+                    drive_type="force",  # 使用力控制，配合 PD 增益实现位置控制
+                    target_type="position",  # 目标为位置
+                    gains=sim_utils.UrdfFileCfg.JointDriveCfg.PDGainsCfg(  # 默认 PD 增益，后续可通过 toggle_stable_mode 调整
+                        stiffness=100.0,  # 刚度，较高值可减少震荡但可能导致数值不稳定，过高会导致仿真崩溃
+                        damping=1.0,  # 阻尼，较高值可减少震荡但可能导致响应变慢
                     ),
                 ),
                 articulation_props=sim_utils.ArticulationRootPropertiesCfg(
@@ -205,100 +219,106 @@ class SimIsaacModel:
                     max_depenetration_velocity=1.0,  # 与物体一致，防止弹出
                 ),
             ),
-            init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)), # 初始位置
+            init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),  # 初始位置
             actuators={
-                "joint1": ImplicitActuatorCfg( # Rotation — 基座关节，需要最高刚度
+                "joint1": ImplicitActuatorCfg(  # Rotation — 基座关节，需要最高刚度
                     joint_names_expr=["joint1"],
                     effort_limit_sim=20.0,
                     velocity_limit_sim=5.0,
                     stiffness=400.0,
                     damping=40.0,
                 ),
-                "joint2": ImplicitActuatorCfg( # Pitch — 承重关节，需抗重力
+                "joint2": ImplicitActuatorCfg(  # Pitch — 承重关节，需抗重力
                     joint_names_expr=["joint2"],
                     effort_limit_sim=20.0,
                     velocity_limit_sim=5.0,
                     stiffness=400.0,
                     damping=40.0,
                 ),
-                "joint3": ImplicitActuatorCfg( # Elbow — 中段关节
+                "joint3": ImplicitActuatorCfg(  # Elbow — 中段关节
                     joint_names_expr=["joint3"],
                     effort_limit_sim=15.0,
                     velocity_limit_sim=5.0,
                     stiffness=200.0,
                     damping=20.0,
                 ),
-                "joint4": ImplicitActuatorCfg( # Wrist_Pitch
+                "joint4": ImplicitActuatorCfg(  # Wrist_Pitch
                     joint_names_expr=["joint4"],
                     effort_limit_sim=10.0,
                     velocity_limit_sim=5.0,
                     stiffness=100.0,
                     damping=10.0,
                 ),
-                "joint5": ImplicitActuatorCfg( # Wrist_Roll
+                "joint5": ImplicitActuatorCfg(  # Wrist_Roll
                     joint_names_expr=["joint5"],
                     effort_limit_sim=10.0,
                     velocity_limit_sim=5.0,
                     stiffness=100.0,
                     damping=10.0,
                 ),
-                "gripper": ImplicitActuatorCfg( # Jaw — 夹爪需要柔顺但足够到位
+                "gripper": ImplicitActuatorCfg(  # Jaw — 夹爪需要柔顺但足够到位
                     joint_names_expr=["joint_gripper"],
                     effort_limit_sim=5.0,
                     stiffness=50.0,
                     damping=5.0,
-                )
+                ),
             },
-            soft_joint_pos_limit_factor=1.0, # 软限制因子，允许关节在物理极限附近有一定的超出空间，避免过早触发硬限制导致不稳定
+            soft_joint_pos_limit_factor=1.0,  # 软限制因子，允许关节在物理极限附近有一定的超出空间，避免过早触发硬限制导致不稳定
         )
-        
+
         self.OBJ_CFG = AssetBaseCfg(
             spawn=sim_utils.UsdFileCfg(
-                usd_path=os.path.join(os.path.dirname(__file__), "assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd"),
+                usd_path=os.path.join(
+                    os.path.dirname(__file__),
+                    "assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd",
+                ),
                 scale=(0.5, 0.5, 0.5),
             ),
             # 配置质量
-
-            init_state=ArticulationCfg.InitialStateCfg(pos=(OBJ_P2X, OBJ_P2Y, OBJ_P2Z)), # 初始位置
+            init_state=ArticulationCfg.InitialStateCfg(
+                pos=(OBJ_P2X, OBJ_P2Y, OBJ_P2Z)
+            ),  # 初始位置
         )
 
         # 抓取物体属性配置
         # 刚体属性配置
         self._obj_rigid_props = sim_utils.RigidBodyPropertiesCfg(
-                        linear_damping=2.0,
-                        angular_damping=2.0,
-                        max_linear_velocity=1.0,
-                        max_angular_velocity=57.3,
-                        disable_gravity=False,
-                        kinematic_enabled=False,
-                        max_depenetration_velocity=1.0,  # 降低：防止穿透后弹飞
-                        solver_position_iteration_count=16,  # 提高：更精确的接触求解
-                        solver_velocity_iteration_count=4,
-                        sleep_threshold=0.005,
-                        stabilization_threshold=0.001,
-                    )
+            linear_damping=2.0,
+            angular_damping=2.0,
+            max_linear_velocity=1.0,
+            max_angular_velocity=57.3,
+            disable_gravity=False,
+            kinematic_enabled=False,
+            max_depenetration_velocity=1.0,  # 降低：防止穿透后弹飞
+            solver_position_iteration_count=16,  # 提高：更精确的接触求解
+            solver_velocity_iteration_count=4,
+            sleep_threshold=0.005,
+            stabilization_threshold=0.001,
+        )
         # 质量属性配置
-        self._obj_mass_props=sim_utils.MassPropertiesCfg(
-            mass=0.02,               # 质量 0.02kg，适当的质量提高稳定性
+        self._obj_mass_props = sim_utils.MassPropertiesCfg(
+            mass=0.02,  # 质量 0.02kg，适当的质量提高稳定性
             # density=500.0,            # 密度 500kg/m³
         )
         # 碰撞属性配置 - 关键参数用于提高抓取成功率
-        self._obj_collision_props=sim_utils.CollisionPropertiesCfg(
-            contact_offset=0.002,    # 必须远小于物体最薄维度(1cm)的一半
-            rest_offset=0.0,         # 零间隙，紧密接触
+        self._obj_collision_props = sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.002,  # 必须远小于物体最薄维度(1cm)的一半
+            rest_offset=0.0,  # 零间隙，紧密接触
             torsional_patch_radius=0.04,
             min_torsional_patch_radius=0.01,
         )
         # 物理材质属性 - 高摩擦低弹性，便于抓取
-        self._obj_physics_material=sim_utils.RigidBodyMaterialCfg(
-            static_friction=1.5,     # 合理范围：橡胶~1.0-2.0
+        self._obj_physics_material = sim_utils.RigidBodyMaterialCfg(
+            static_friction=1.5,  # 合理范围：橡胶~1.0-2.0
             dynamic_friction=1.0,
             restitution=0,
             friction_combine_mode="average",  # average 更稳定，避免 multiply 导致极端值
             restitution_combine_mode="max",
         )
         # 视觉材质
-        self._obj_visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1))
+        self._obj_visual_material = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.8, 0.1, 0.1)
+        )
 
         # 构建场景配置
         @configclass
@@ -309,19 +329,21 @@ class SimIsaacModel:
             )
             dome_light = AssetBaseCfg(
                 prim_path="/World/Light",
-                spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
+                spawn=sim_utils.DomeLightCfg(
+                    intensity=3000.0, color=(0.75, 0.75, 0.75)
+                ),
             )
             koch = self.KOCH_CFG.replace(prim_path="{ENV_REGEX_NS}/Koch")
-            
-            orange = self.OBJ_CFG.replace(prim_path="{ENV_REGEX_NS}/Orange")
 
-            # Target object (dynamic cuboid, will be randomized) 
+            # orange = self.OBJ_CFG.replace(prim_path="{ENV_REGEX_NS}/Orange")
+
+            # Target object (dynamic cuboid, will be randomized)
             # 添加一个物体 摩檫力增大 变成柔体
             cube = RigidObjectCfg(
                 prim_path="{ENV_REGEX_NS}/Cube",
                 spawn=sim_utils.CuboidCfg(
                     size=(OBJ_L, OBJ_W, OBJ_H),  # 立方体尺寸
-                    activate_contact_sensors=True, # 启用 sensors
+                    activate_contact_sensors=True,  # 启用 sensors
                     rigid_props=self._obj_rigid_props,
                     mass_props=self._obj_mass_props,
                     # 碰撞属性配置 - 关键参数用于提高抓取成功率
@@ -329,7 +351,7 @@ class SimIsaacModel:
                     # 物理材质属性 - 高摩擦低弹性，便于抓取
                     physics_material=self._obj_physics_material,
                     # 视觉材质
-                    visual_material=self._obj_visual_material
+                    visual_material=self._obj_visual_material,
                 ),
                 init_state=RigidObjectCfg.InitialStateCfg(
                     pos=(OBJ_PX, OBJ_PY, OBJ_PZ),
@@ -356,8 +378,7 @@ class SimIsaacModel:
             #         pos=(0.1, 0.15, 0.03),  # 放在cube旁边
             #     ),
             # )
-            
-            
+
             # 挂载在 gripper_static_1 上的相机传感器，严格参考 MuJoCo:
             # <camera name="gripper_cam" pos="0 0.08 0" xyaxes="1 0 0 0 0.8 -0.6"/>
             # 其中 xyaxes 对应旋转矩阵列向量:
@@ -366,53 +387,58 @@ class SimIsaacModel:
             gripper_cam = CameraCfg(
                 # 相机在 USD stage 中的 prim 路径（挂在 gripper_static_1 下）
                 prim_path="{ENV_REGEX_NS}/Koch/gripper_static_1/gripper_cam",
-                update_period=0.1, # 传感器输出周期（秒）：每 0.1s 输出一次数据
-                height=CAM_HEIGHT, # 输出图像分辨率（像素）
+                update_period=0.1,  # 传感器输出周期（秒）：每 0.1s 输出一次数据
+                height=CAM_HEIGHT,  # 输出图像分辨率（像素）
                 width=CAM_WIDTH,
-                data_types=["rgb"], # 需要的输出数据类型（此处只要 RGB 图像）
+                data_types=["rgb"],  # 需要的输出数据类型（此处只要 RGB 图像）
                 # Pinhole 相机模型参数（内参/成像模型）
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.0, # 焦距（与 horizontal_aperture 配合计算内参），示例值 24.0
-                    focus_distance=400.0, # 对焦距离（与场景单位一致）
-                    horizontal_aperture=20.955, # 传感器水平孔径（单位与 focal_length 保持一致）
-                    clipping_range=(0.01, 1.0e5), # 裁剪近平面和远平面（场景距离单位）
+                    focal_length=24.0,  # 焦距（与 horizontal_aperture 配合计算内参），示例值 24.0
+                    focus_distance=400.0,  # 对焦距离（与场景单位一致）
+                    horizontal_aperture=20.955,  # 传感器水平孔径（单位与 focal_length 保持一致）
+                    clipping_range=(0.01, 1.0e5),  # 裁剪近平面和远平面（场景距离单位）
                 ),
                 # 相机相对父体的位姿偏移
                 offset=CameraCfg.OffsetCfg(
-                    pos=CAM_POS, # 平移偏移（x, y, z），单位为场景距离（通常米）
+                    pos=CAM_POS,  # 平移偏移（x, y, z），单位为场景距离（通常米）
                     # 旋转偏移：四元数 (w, x, y, z)
                     # 注意：四元数方向和符号需要与场景其他部分一致（此处来源于 MuJoCo->Isaac 的映射）
-                    rot=CAM_ROT, # 测试为正好看到夹爪 (x:-80,y:0,z:0)
-                    convention="opengl", # 偏移的解释约定，例如 "world" 表示以世界/绝对参照解释，
+                    rot=CAM_ROT,  # 测试为正好看到夹爪 (x:-80,y:0,z:0)
+                    convention="opengl",  # 偏移的解释约定，例如 "world" 表示以世界/绝对参照解释，
                 ),
             )
 
-            
             # --- 夹爪上（两个连杆）被 Cube 施加的力：分别在活动抓手和静态爪体上放传感器 ---
             # 说明：prim_path 指定传感器挂载的 prim（必须唯一对应该环境内的一个 body），
             # filter_prim_paths_expr 用于只报告与哪些 prim 的接触（这里只跟 Cube 的接触会被上报）
             gripper_move_contact_cfg = ContactSensorCfg(
-                prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",   # 传感器挂在活动爪体（moving）
-                filter_prim_paths_expr=["{ENV_REGEX_NS}/Cube"],     # 只跟 Cube 的接触被记录
-                track_pose=True,               # 是否记录传感器原点位姿（world frame）
-                track_contact_points=True,     # 是否记录每个接触点的位置（用于可视化/定位力箭头）
-                track_friction_forces=True,    # 是否记录摩擦（切向）分力
-                track_air_time=True,           # 是否追踪“空中/接触”时间（需要 force_threshold）
-                force_threshold=0.5,           # 小于此合力范数被认为“无接触”（用于 track_air_time）
-                debug_vis=True,                # 在场景中画力箭头/接触点，便于调试验证
-                update_period=0.0,             # 0.0 表示每个仿真步都更新
-                history_length=6,              # 保存的历史帧数（用于平滑/历史查询）
+                prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",  # 传感器挂在活动爪体（moving）
+                filter_prim_paths_expr=[
+                    "{ENV_REGEX_NS}/Cube"
+                ],  # 只跟 Cube 的接触被记录
+                track_pose=True,  # 是否记录传感器原点位姿（world frame）
+                track_contact_points=True,  # 是否记录每个接触点的位置（用于可视化/定位力箭头）
+                track_friction_forces=True,  # 是否记录摩擦（切向）分力
+                track_air_time=True,  # 是否追踪“空中/接触”时间（需要 force_threshold）
+                force_threshold=0.5,  # 小于此合力范数被认为“无接触”（用于 track_air_time）
+                debug_vis=True,  # 在场景中画力箭头/接触点，便于调试验证
+                update_period=0.0,  # 0.0 表示每个仿真步都更新
+                history_length=6,  # 保存的历史帧数（用于平滑/历史查询）
                 max_contact_data_count_per_prim=32,  # 每个 prim 最多保存多少个接触记录（避免数据溢出）
                 visualizer_cfg=VisualizationMarkersCfg(
                     prim_path="/Visuals/ContactSensorGripperMove",
                     markers={
                         "contact": sim_utils.SphereCfg(
                             radius=0.012,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.4, 0.0)),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 0.4, 0.0)
+                            ),
                         ),
                         "no_contact": sim_utils.SphereCfg(
                             radius=0.012,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.8, 0.3)),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 0.8, 0.3)
+                            ),
                             visible=False,
                         ),
                     },
@@ -436,11 +462,15 @@ class SimIsaacModel:
                     markers={
                         "contact": sim_utils.SphereCfg(
                             radius=0.010,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.6, 1.0)),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.1, 0.6, 1.0)
+                            ),
                         ),
                         "no_contact": sim_utils.SphereCfg(
                             radius=0.010,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.8, 1.0)),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.5, 0.8, 1.0)
+                            ),
                             visible=False,
                         ),
                     },
@@ -455,12 +485,12 @@ class SimIsaacModel:
                     "{ENV_REGEX_NS}/Koch/gripper_moving_1",
                     "{ENV_REGEX_NS}/Koch/gripper_static_1",
                 ],  # 只关注来自夹爪两个 body 的接触
-                track_pose=False,              # 通常物体本身位姿通过 object.data.root_pos_w 可得，传感器不必重复记录
-                track_contact_points=True,     # 记录所有接触点位置（用于定位受力位置）
-                track_friction_forces=True,    # 记录摩擦力分量
-                track_air_time=False,          # 对物体通常不需要追踪 air/contact 时间，可按需打开
+                track_pose=False,  # 通常物体本身位姿通过 object.data.root_pos_w 可得，传感器不必重复记录
+                track_contact_points=True,  # 记录所有接触点位置（用于定位受力位置）
+                track_friction_forces=True,  # 记录摩擦力分量
+                track_air_time=False,  # 对物体通常不需要追踪 air/contact 时间，可按需打开
                 force_threshold=0.5,
-                debug_vis=True,                # 在世界中绘制受力箭头（来自 contact_pos_w 和力向量）
+                debug_vis=True,  # 在世界中绘制受力箭头（来自 contact_pos_w 和力向量）
                 update_period=0.0,
                 history_length=6,
                 max_contact_data_count_per_prim=32,
@@ -469,40 +499,44 @@ class SimIsaacModel:
                     markers={
                         "contact": sim_utils.SphereCfg(
                             radius=0.008,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.7, 0.2, 1.0)),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.7, 0.2, 1.0)
+                            ),
                         ),
                         "no_contact": sim_utils.SphereCfg(
                             radius=0.008,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.6, 1.0)),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.85, 0.6, 1.0)
+                            ),
                             visible=False,
                         ),
                     },
                 ),
             )
 
-
-
         self._scene_cfg_class = _SceneCfg
 
         # 初始化仿真
         sim_cfg = sim_utils.SimulationCfg(
             dt=1.0 / 200.0,  # 200Hz：1cm薄物体需要更高频率防穿透
-            device=args_cli.device if hasattr(args_cli, 'device') and args_cli.device else "cuda:0",
+            device=(
+                args_cli.device
+                if hasattr(args_cli, "device") and args_cli.device
+                else "cuda:0"
+            ),
             physx=sim_utils.PhysxCfg(
                 enable_ccd=True,
                 enable_stabilization=True,
                 bounce_threshold_velocity=0.2,
             ),
         )
-        
-        
+
         self._sim = sim_utils.SimulationContext(sim_cfg)
         self._sim.set_camera_view([0.5, 0.5, 0.5], [0.0, 0.0, 0.15])
         scene_cfg = self._scene_cfg_class(num_envs=1, env_spacing=2.0)
         self._scene = InteractiveScene(scene_cfg)
         self._sim.reset()
-        
-        
+
         # 添加夹爪表面材质
         gripper_mat_cfg = sim_utils.RigidBodyMaterialCfg(
             static_friction=2.0,
@@ -514,8 +548,12 @@ class SimIsaacModel:
         material_pattern = f"{self._scene.env_regex_ns}/Koch/physicsMaterial_gripper"
         gripper_mat_cfg.func(material_pattern, gripper_mat_cfg)
         # 3) 找到每个具体的 gripper_static / gripper_moving prim，然后绑定对应的材质 prim
-        static_paths = sim_utils.find_matching_prim_paths(f"{self._scene.env_regex_ns}/Koch/gripper_static_1")
-        moving_paths = sim_utils.find_matching_prim_paths(f"{self._scene.env_regex_ns}/Koch/gripper_moving_1")
+        static_paths = sim_utils.find_matching_prim_paths(
+            f"{self._scene.env_regex_ns}/Koch/gripper_static_1"
+        )
+        moving_paths = sim_utils.find_matching_prim_paths(
+            f"{self._scene.env_regex_ns}/Koch/gripper_moving_1"
+        )
         # 绑定：对每个具体 prim，材质 prim 路径与其父路径对应
         for static_path in static_paths:
             parent = static_path.rsplit("/", 1)[0]  # e.g. /World/envs/env_0/Koch
@@ -554,32 +592,45 @@ class SimIsaacModel:
         self._gripper_body_id = gripper_body_ids[0]
 
         # IK 控制器
-        diff_ik_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
-        self._ik_controller = DifferentialIKController(diff_ik_cfg, num_envs=1, device=self._sim.device)
-        self._robot_entity_cfg = SceneEntityCfg("koch", joint_names=["joint[1-5]"], body_names=["gripper_static_1"])
+        diff_ik_cfg = DifferentialIKControllerCfg(
+            command_type="pose", use_relative_mode=False, ik_method="dls"
+        )
+        self._ik_controller = DifferentialIKController(
+            diff_ik_cfg, num_envs=1, device=self._sim.device
+        )
+        self._robot_entity_cfg = SceneEntityCfg(
+            "koch", joint_names=["joint[1-5]"], body_names=["gripper_static_1"]
+        )
         self._robot_entity_cfg.resolve(self._scene)
         self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0] - 1
-        
-        
+
         # 添加默认视角（机械臂在原点，高约 0.3m，中心约 0.12m）
-        self.add_view("top", {
-            "eye": [0.0, -0.1, 1.3],
-            "target": [0.0, 0.0, 0.1],
-            "focal_length": 18.0,
-        })
-        self.add_view("side", {
-            "eye": [1.15, 0.0, 0.2],
-            "target": [0.0, 0.0, 0.12],
-        })
-        self.add_view("front", {
-            "eye": [0.0, 1.35, 0.25],
-            "target": [0.0, 0.0, 0.12],
-        })
-        self.add_sensor_view("gripper_cam",
-                             "/World/envs/env_0/Koch/gripper_static_1/gripper_cam")
+        self.add_view(
+            "top",
+            {
+                "eye": [0.0, -0.1, 1.3],
+                "target": [0.0, 0.0, 0.1],
+                "focal_length": 18.0,
+            },
+        )
+        self.add_view(
+            "side",
+            {
+                "eye": [1.15, 0.0, 0.2],
+                "target": [0.0, 0.0, 0.12],
+            },
+        )
+        self.add_view(
+            "front",
+            {
+                "eye": [0.0, 1.35, 0.25],
+                "target": [0.0, 0.0, 0.12],
+            },
+        )
+        self.add_sensor_view(
+            "gripper_cam", "/World/envs/env_0/Koch/gripper_static_1/gripper_cam"
+        )
         # self.add_viewport("top")  # 启动时默认显示 top 视角的 viewport TODO 仍有问题，仍需手动添加
-        
-        
 
         print("[INFO]: SimIsaacModel setup complete.")
 
@@ -590,14 +641,16 @@ class SimIsaacModel:
     # 输入关节角度列表，单位为弧度
     def set_joint_angles(self, joint_angles):
         if isinstance(joint_angles, list):
-            joint_angles = torch.tensor(joint_angles, dtype=torch.float32, device=self._sim.device)
-        self._target_pos[0, :len(joint_angles)] = joint_angles
+            joint_angles = torch.tensor(
+                joint_angles, dtype=torch.float32, device=self._sim.device
+            )
+        self._target_pos[0, : len(joint_angles)] = joint_angles
         self._robot.set_joint_position_target(self._target_pos)
         # 步进仿真
         self._scene.write_data_to_sim()
         self._sim.step()
         self._scene.update(self._sim_dt)
-    
+
     # 根据末端位姿设定机械臂姿态
     def set_arm_pose(self, target_pos, target_rot, gripper_ang=None):
         # target_pos = pos(3)
@@ -605,15 +658,16 @@ class SimIsaacModel:
         # TODO 先不设置夹爪开合
         pos = self.isaac_ik_trace(target_pos, target_rot, steps=1)
         target = torch.tensor(pos[0], dtype=torch.float32, device=self._sim.device)
-        target[5] = gripper_ang if gripper_ang is not None else self._target_pos[0, 5] # 保持当前夹爪状态
+        target[5] = (
+            gripper_ang if gripper_ang is not None else self._target_pos[0, 5]
+        )  # 保持当前夹爪状态
         self.set_joint_angles(target)
-        
 
     # 获取当前关节角度列表，单位为弧度
     def get_joint_angles(self, joint_angles=None):
         return self._robot.data.joint_pos[0].cpu().tolist()
-    
-    def add_sensor_view(self, view_name, camera_prim_path, view_params = None):
+
+    def add_sensor_view(self, view_name, camera_prim_path, view_params=None):
         """添加一个基于场景中已有 camera prim 的视角（如挂在机器人 link 上的传感器相机）。
         view_params: dict
             - eye: [x, y, z] 相机位置（世界坐标）
@@ -649,7 +703,10 @@ class SimIsaacModel:
         coi_prop = camera_prim.GetProperty("omni:kit:centerOfInterest")
         if not coi_prop or not coi_prop.IsValid():
             camera_prim.CreateAttribute(
-                "omni:kit:centerOfInterest", Sdf.ValueTypeNames.Vector3d, True, Sdf.VariabilityUniform
+                "omni:kit:centerOfInterest",
+                Sdf.ValueTypeNames.Vector3d,
+                True,
+                Sdf.VariabilityUniform,
             ).Set(Gf.Vec3d(0, 0, -10))
 
         # 通过 ViewportCameraState 设置相机位置和注视点
@@ -718,7 +775,9 @@ class SimIsaacModel:
         import asyncio
 
         if view_name not in self._views:
-            print(f"[Viewport] Error: view '{view_name}' not found. Available views: {list(self._views.keys())}")
+            print(
+                f"[Viewport] Error: view '{view_name}' not found. Available views: {list(self._views.keys())}"
+            )
             return None
 
         camera_path = self._views[view_name]["camera_path"]
@@ -732,19 +791,27 @@ class SimIsaacModel:
             viewport_api.create_viewport_window(window_name)
 
             # 异步等待窗口创建并设置相机
-            asyncio.ensure_future(self._setup_viewport_camera(window_name, camera_path, view_name))
+            asyncio.ensure_future(
+                self._setup_viewport_camera(window_name, camera_path, view_name)
+            )
 
-            print(f"[Viewport] Creating viewport window '{window_name}' for camera '{camera_path}'")
+            print(
+                f"[Viewport] Creating viewport window '{window_name}' for camera '{camera_path}'"
+            )
             print(f"[Viewport] Window will be docked next to main Viewport once ready")
 
             return window_name
 
         except Exception as e:
             print(f"[Viewport] Failed to create viewport window: {e}")
-            print(f"[Viewport] Tip: You can use switch_view('{view_name}') to change the main viewport instead")
+            print(
+                f"[Viewport] Tip: You can use switch_view('{view_name}') to change the main viewport instead"
+            )
             return None
 
-    async def _setup_viewport_camera(self, window_name: str, camera_path: str, view_name: str):
+    async def _setup_viewport_camera(
+        self, window_name: str, camera_path: str, view_name: str
+    ):
         """异步设置 viewport 的相机并停靠窗口"""
         # 等待窗口创建完成
         for i in range(10):
@@ -756,13 +823,17 @@ class SimIsaacModel:
             if new_viewport:
                 # 设置相机路径
                 new_viewport.set_active_camera(camera_path)
-                print(f"[Viewport] Successfully set camera '{camera_path}' for viewport '{window_name}'")
+                print(
+                    f"[Viewport] Successfully set camera '{camera_path}' for viewport '{window_name}'"
+                )
 
                 # 停靠窗口
                 await self._dock_viewport_window(window_name)
                 return
 
-        print(f"[Viewport] Warning: Could not get viewport handle for '{window_name}' after creation")
+        print(
+            f"[Viewport] Warning: Could not get viewport handle for '{window_name}' after creation"
+        )
 
     async def _dock_viewport_window(self, window_name: str):
         """异步停靠 viewport 窗口到主 Viewport 旁边"""
@@ -781,10 +852,12 @@ class SimIsaacModel:
             custom_window.dock_in(viewport_window, ui.DockPosition.RIGHT, 0.5)
             print(f"[Viewport] Docked '{window_name}' next to main Viewport")
         elif custom_window:
-            print(f"[Viewport] Window '{window_name}' created but could not dock (main Viewport not found)")
+            print(
+                f"[Viewport] Window '{window_name}' created but could not dock (main Viewport not found)"
+            )
         else:
             print(f"[Viewport] Could not find window '{window_name}' in workspace")
-    
+
     # 切换稳定模式（增加阻尼，减少晃动）
     def toggle_stable_mode(self, enable):
         self._stable_mode = enable
@@ -799,9 +872,16 @@ class SimIsaacModel:
         # 通过写入 actuator 的属性来调整 PD 增益
         self._robot.actuators["all_joints"].stiffness[:] = stiffness
         self._robot.actuators["all_joints"].damping[:] = damping
-        print(f"[Stable] {'Enabled' if enable else 'Disabled'} (stiffness={stiffness}, damping={damping})")
+        print(
+            f"[Stable] {'Enabled' if enable else 'Disabled'} (stiffness={stiffness}, damping={damping})"
+        )
 
-    def joint_angles_to_poses(self, joint_angles, last_joint_body_name="gripper_static_1", gripper_body_name="gripper_moving_1"):
+    def joint_angles_to_poses(
+        self,
+        joint_angles,
+        last_joint_body_name="gripper_static_1",
+        gripper_body_name="gripper_moving_1",
+    ):
         """
         正运动学：根据关节角度计算末端位姿。
 
@@ -835,8 +915,8 @@ class SimIsaacModel:
         gripper_quat = _rotation_matrix_to_quat(T_gripper[:3, :3].numpy())
 
         return {
-            'last_joint': {'pos': last_pos, 'quat': last_quat},
-            'gripper':    {'pos': gripper_pos, 'quat': gripper_quat},
+            "last_joint": {"pos": last_pos, "quat": last_quat},
+            "gripper": {"pos": gripper_pos, "quat": gripper_quat},
         }
 
     def get_current_poses(self):
@@ -848,14 +928,16 @@ class SimIsaacModel:
         dict  （格式同 joint_angles_to_poses）
         """
         ee_pos = self._robot.data.body_pos_w[0, self._ee_body_id].cpu().numpy()
-        ee_quat = self._robot.data.body_quat_w[0, self._ee_body_id].cpu().numpy()  # [w,x,y,z]
+        ee_quat = (
+            self._robot.data.body_quat_w[0, self._ee_body_id].cpu().numpy()
+        )  # [w,x,y,z]
 
         grip_pos = self._robot.data.body_pos_w[0, self._gripper_body_id].cpu().numpy()
         grip_quat = self._robot.data.body_quat_w[0, self._gripper_body_id].cpu().numpy()
 
         return {
-            'last_joint': {'pos': ee_pos, 'quat': ee_quat},
-            'gripper':    {'pos': grip_pos, 'quat': grip_quat},
+            "last_joint": {"pos": ee_pos, "quat": ee_quat},
+            "gripper": {"pos": grip_pos, "quat": grip_quat},
         }
 
     # 移动到预设的 home 位姿（所有关节角度为 0）
@@ -863,7 +945,7 @@ class SimIsaacModel:
         pass
 
     # isaac sim ik 逆运动学求解 - 并插值，生成平滑轨迹
-    def isaac_ik_trace(self, pos, quat = None, rot_rad = 0, steps=10):
+    def isaac_ik_trace(self, pos, quat=None, rot_rad=0, steps=10):
         """
         参考并使用 IsaacLab 的 DifferentialIKController，求解目标末端位姿对应的关节目标，
         能够在当前关节角和目标关节角之间做线性插值，生成平滑轨迹。
@@ -879,17 +961,20 @@ class SimIsaacModel:
         """
         steps = max(int(steps), 1)
         device = self._sim.device
-        
+
         if quat is None and pos is None:
             # raise ValueError("At least one of pos or quat must be provided for IK target.")
             return None
-        
+
         if pos is None:
             # 保持当前位置不发生改变
-            target_pos_w = self._robot.data.body_pos_w[:, self._robot_entity_cfg.body_ids[0]]
-        else :
-            target_pos_w = torch.as_tensor(pos, dtype=torch.float32, device=device).reshape(1, 3)
-
+            target_pos_w = self._robot.data.body_pos_w[
+                :, self._robot_entity_cfg.body_ids[0]
+            ]
+        else:
+            target_pos_w = torch.as_tensor(
+                pos, dtype=torch.float32, device=device
+            ).reshape(1, 3)
 
         ee_pos_w = self._robot.data.body_pos_w[:, self._robot_entity_cfg.body_ids[0]]
         ee_quat_w = self._robot.data.body_quat_w[:, self._robot_entity_cfg.body_ids[0]]
@@ -899,34 +984,48 @@ class SimIsaacModel:
         if quat is None:
             target_quat_w = ee_quat_w.clone()
         else:
-            target_quat_w = torch.as_tensor(quat, dtype=torch.float32, device=device).reshape(1, 4)
+            target_quat_w = torch.as_tensor(
+                quat, dtype=torch.float32, device=device
+            ).reshape(1, 4)
             quat_norm = torch.linalg.norm(target_quat_w, dim=1, keepdim=True)
             if torch.any(quat_norm < 1e-8):
                 raise ValueError("Target quaternion norm must be non-zero.")
             target_quat_w = target_quat_w / quat_norm
-            
+
         if rot_rad != 0:
             # 构造绕 Z 轴旋转的四元数
-            rot_quat = torch.tensor([
-                math.cos(rot_rad/2),  # w: 实部
-                0,                    # x: 绕X轴分量为0
-                0,                    # y: 绕Y轴分量为0  
-                math.sin(rot_rad/2)   # z: 绕Z轴分量
-            ], dtype=torch.float32, device=device).reshape(1, 4)
-            
+            rot_quat = torch.tensor(
+                [
+                    math.cos(rot_rad / 2),  # w: 实部
+                    0,  # x: 绕X轴分量为0
+                    0,  # y: 绕Y轴分量为0
+                    math.sin(rot_rad / 2),  # z: 绕Z轴分量
+                ],
+                dtype=torch.float32,
+                device=device,
+            ).reshape(1, 4)
+
             # 将新旋转叠加到原朝向上
             target_quat_w = _quat_multiply(rot_quat, target_quat_w)
 
-        ee_pos_b, ee_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
-        target_pos_b, target_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, target_pos_w, target_quat_w)
+        ee_pos_b, ee_quat_b = subtract_frame_transforms(
+            root_pos_w, root_quat_w, ee_pos_w, ee_quat_w
+        )
+        target_pos_b, target_quat_b = subtract_frame_transforms(
+            root_pos_w, root_quat_w, target_pos_w, target_quat_w
+        )
 
         ik_command = torch.cat((target_pos_b, target_quat_b), dim=1)
         self._ik_controller.reset()
         self._ik_controller.set_command(ik_command)
 
-        jacobian = self._robot.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, self._robot_entity_cfg.joint_ids]
+        jacobian = self._robot.root_physx_view.get_jacobians()[
+            :, self._ee_jacobi_idx, :, self._robot_entity_cfg.joint_ids
+        ]
         joint_pos = self._robot.data.joint_pos[:, self._robot_entity_cfg.joint_ids]
-        joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+        joint_pos_des = self._ik_controller.compute(
+            ee_pos_b, ee_quat_b, jacobian, joint_pos
+        )
 
         current_joint_pos = self._robot.data.joint_pos[0].clone()
         target_joint_pos = current_joint_pos.clone()
@@ -935,37 +1034,55 @@ class SimIsaacModel:
         trajectory = []
         for i in range(steps):
             alpha = 1.0 if steps == 1 else i / (steps - 1)
-            waypoint = current_joint_pos + alpha * (target_joint_pos - current_joint_pos)
+            waypoint = current_joint_pos + alpha * (
+                target_joint_pos - current_joint_pos
+            )
             trajectory.append(waypoint.detach().cpu().tolist())
 
         return trajectory
-
 
     def contact_sensor_infor(self):
         # print information from the sensors
         print("-------------------------------")
         print(self._scene["gripper_move_contact_cfg"])
-        print("Received force matrix of: ", self._scene["gripper_move_contact_cfg"].data.force_matrix_w)
-        print("Received contact force of: ", self._scene["gripper_move_contact_cfg"].data.net_forces_w)
+        print(
+            "Received force matrix of: ",
+            self._scene["gripper_move_contact_cfg"].data.force_matrix_w,
+        )
+        print(
+            "Received contact force of: ",
+            self._scene["gripper_move_contact_cfg"].data.net_forces_w,
+        )
         print("-------------------------------")
         print(self._scene["gripper_static_contact_cfg"])
-        print("Received force matrix of: ", self._scene["gripper_static_contact_cfg"].data.force_matrix_w)
-        print("Received contact force of: ", self._scene["gripper_static_contact_cfg"].data.net_forces_w)
+        print(
+            "Received force matrix of: ",
+            self._scene["gripper_static_contact_cfg"].data.force_matrix_w,
+        )
+        print(
+            "Received contact force of: ",
+            self._scene["gripper_static_contact_cfg"].data.net_forces_w,
+        )
         print("-------------------------------")
         print(self._scene["cube_contact_forces"])
-        print("Received force matrix of: ", self._scene["cube_contact_forces"].data.force_matrix_w)
-        print("Received contact force of: ", self._scene["cube_contact_forces"].data.net_forces_w)
+        print(
+            "Received force matrix of: ",
+            self._scene["cube_contact_forces"].data.force_matrix_w,
+        )
+        print(
+            "Received contact force of: ",
+            self._scene["cube_contact_forces"].data.net_forces_w,
+        )
         print("-------------------------------")
 
-        
     def step(self):
         """执行一步仿真"""
         self._robot.set_joint_position_target(self._target_pos)
         self._scene.write_data_to_sim()
         self._sim.step()
         self._scene.update(self._sim_dt)
-        if DEBUG_MODE:
-            self.contact_sensor_infor()
+        # if DEBUG_MODE:
+        #     self.contact_sensor_infor()
 
     def reset(self):
         """重置机械臂到默认位置"""
@@ -981,17 +1098,25 @@ class SimIsaacModel:
 
         # 删除场景中添加的随机物体
         self.remove_random_object()
-        
+
         # 重置物体位置为初始位置
         if "cube" in self._scene.keys():
             cube = self._scene["cube"]
-            initial_pos = torch.tensor([[0.0, 0.15, OBJ_Z]], dtype=torch.float32, device=cube.device) + self._scene.env_origins
-            initial_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=cube.device)
+            initial_pos = (
+                torch.tensor(
+                    [[0.0, 0.15, OBJ_Z]], dtype=torch.float32, device=cube.device
+                )
+                + self._scene.env_origins
+            )
+            initial_quat = torch.tensor(
+                [[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=cube.device
+            )
             cube.write_root_pose_to_sim(torch.cat((initial_pos, initial_quat), dim=1))
-            cube.write_root_velocity_to_sim(torch.zeros((1, 6), dtype=torch.float32, device=cube.device))
+            cube.write_root_velocity_to_sim(
+                torch.zeros((1, 6), dtype=torch.float32, device=cube.device)
+            )
             print("[Object] Reset cube to initial position")
-        
-        
+
     def grasp_open(self):
         """打开夹爪"""
         self._target_pos[0, 5] = GRIPPER_OPEN
@@ -1002,17 +1127,17 @@ class SimIsaacModel:
         self._target_pos[0, 5] = GRIPPER_CLOSED
         self._robot.set_joint_position_target(self._target_pos)
 
-    def gripper_state(self)->float:
+    def gripper_state(self) -> float:
         """返回夹爪电机的角度"""
         return self._robot.data.joint_pos[0, 5].cpu().item()
 
-    def is_grasping(self, threshold=0.02)->bool:
+    def is_grasping(self, threshold=0.02) -> bool:
         """根据夹爪当前状态判断是否正在夹持物体，threshold 是夹爪闭合的角度阈值（弧度）"""
         gripper_angle = self.gripper_state()
         # If gripper is more closed than threshold from fully open, consider it grasping
         return abs(gripper_angle - GRIPPER_OPEN) > threshold
 
-    def get_object_position(self)->np.ndarray:
+    def get_object_position(self) -> np.ndarray:
         """获取场景中物体的当前位置
 
         Returns:
@@ -1025,9 +1150,9 @@ class SimIsaacModel:
         cube = self._scene["cube"]
         return cube.data.root_pos_w[0].cpu().numpy()
 
-    def randomize_object(self, position=None)->dict:
+    def randomize_object(self, position=None) -> dict:
         """在场景中的地面上随机(指定范围内)/指定位置添加一个物体，返回物体的坐标
-         使用场景中已有的 cube 对象并随机化其位置
+        使用场景中已有的 cube 对象并随机化其位置
         """
         # Get the cube from the scene
         if "cube" not in self._scene.keys():
@@ -1046,19 +1171,21 @@ class SimIsaacModel:
             x, y, z = position
 
         # Random orientation (yaw only)
-        yaw = random.uniform(0, 2 * math.pi)
+        # yaw = math.pi / 2
+        yaw = random.uniform(0, math.pi / 2)
         qw = math.cos(yaw / 2)
         qx, qy = 0.0, 0.0
         qz = math.sin(yaw / 2)
-        if DEBUG_MODE :
+        if DEBUG_MODE:
             # 固定位置和朝向用于调试
             x, y, z = 0.0, 0.15, OBJ_Z
             qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
             position = (x, y, z)
-            
 
         # Write to simulation
-        pose = torch.tensor([[x, y, z, qw, qx, qy, qz]], dtype=torch.float32, device=cube.device)
+        pose = torch.tensor(
+            [[x, y, z, qw, qx, qy, qz]], dtype=torch.float32, device=cube.device
+        )
         pose[:, :3] += self._scene.env_origins
         cube.write_root_pose_to_sim(pose)
 
@@ -1067,17 +1194,21 @@ class SimIsaacModel:
         cube.write_root_velocity_to_sim(zero_vel)
 
         print(f"[Object] Randomized cube at ({x:.3f}, {y:.3f}, {z:.3f})")
-        
+
         # 根据 rot 算出旋转角度
         euler_x, euler_y, euler_z = euler_from_quaternion(qw, qx, qy, qz)
-        print(f"[Object] Cube quaternion: (w={qw:.3f}, x={qx:.3f}, y={qy:.3f}, z={qz:.3f})")
-        print(f"[Object] Cube orientation (Euler angles): ({euler_x}°, {euler_y}°, {euler_z}°)")
+        print(
+            f"[Object] Cube quaternion: (w={qw:.3f}, x={qx:.3f}, y={qy:.3f}, z={qz:.3f})"
+        )
+        print(
+            f"[Object] Cube orientation (Euler angles): ({euler_x}°, {euler_y}°, {euler_z}°)"
+        )
 
         return {
-            'name': 'cube',
-            'position': position,
-            'orientation': (qw, qx, qy, qz),
-            'euler_angles': (euler_x, euler_y, euler_z),
+            "name": "cube",
+            "position": position,
+            "orientation": (qw, qx, qy, qz),
+            "euler_angles": (euler_x, euler_y, euler_z),
         }
 
     def remove_random_object(self):
@@ -1088,7 +1219,7 @@ class SimIsaacModel:
 
         stage = get_current_stage()
         for obj_info in self._random_objects:
-            prim_path = obj_info['prim_path']
+            prim_path = obj_info["prim_path"]
             prim = stage.GetPrimAtPath(prim_path)
             if prim.IsValid():
                 stage.RemovePrim(prim_path)
@@ -1120,7 +1251,7 @@ class SimIsaacModel:
                 # 物理材质属性 - 高摩擦低弹性，便于抓取
                 physics_material=self._obj_physics_material,
                 # 视觉材质
-                visual_material=self._obj_visual_material
+                visual_material=self._obj_visual_material,
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
                 pos=(x, y, z),
@@ -1129,19 +1260,24 @@ class SimIsaacModel:
         )
 
         # Spawn the object
-        obj_cfg.spawn.func(prim_path, obj_cfg.spawn, translation=(x, y, z), orientation=(qw, qx, qy, qz))
+        obj_cfg.spawn.func(
+            prim_path,
+            obj_cfg.spawn,
+            translation=(x, y, z),
+            orientation=(qw, qx, qy, qz),
+        )
 
         print(f"[Object] Added: {name} at ({x:.3f}, {y:.3f}, {z:.3f})")
         # 根据 rot 算出旋转角度
         euler_x, euler_y, euler_z = euler_from_quaternion(qw, qx, qy, qz)
 
         return {
-            'name': name,
-            'prim_path': prim_path,
-            'position': position,
-            'size': size,
-            'orientation': (qw, qx, qy, qz),
-            'euler_angles': (euler_x, euler_y, euler_z),
+            "name": name,
+            "prim_path": prim_path,
+            "position": position,
+            "size": size,
+            "orientation": (qw, qx, qy, qz),
+            "euler_angles": (euler_x, euler_y, euler_z),
         }
 
     def del_object(self, name):
@@ -1156,7 +1292,7 @@ class SimIsaacModel:
         else:
             print(f"[Object] Not found: {name}")
             return False
-    
+
     def get_cube(self):
         """获取场景中的 cube 对象"""
         if "cube" in self._scene.keys():
@@ -1173,22 +1309,24 @@ class SimIsaacModel:
 # FK 辅助函数
 # =============================================================================
 
+
 # 构造并返回一个 4x4 齐次变换矩阵（torch.float32），表示先平移 (tx,ty,tz) 再绕指定轴旋转 angle（右手规则）
 def _make_transform(tx, ty, tz, axis, angle):
     """构造 4x4 齐次变换矩阵: Translation(tx,ty,tz) @ Rotation(axis, angle)"""
     c, s = math.cos(angle), math.sin(angle)
     T = torch.eye(4, dtype=torch.float32)
     T[0, 3], T[1, 3], T[2, 3] = tx, ty, tz
-    if axis == 'x':
+    if axis == "x":
         T[1, 1], T[1, 2] = c, -s
-        T[2, 1], T[2, 2] = s,  c
-    elif axis == 'y':
-        T[0, 0], T[0, 2] =  c, s
+        T[2, 1], T[2, 2] = s, c
+    elif axis == "y":
+        T[0, 0], T[0, 2] = c, s
         T[2, 0], T[2, 2] = -s, c
     else:  # z
         T[0, 0], T[0, 1] = c, -s
-        T[1, 0], T[1, 1] = s,  c
+        T[1, 0], T[1, 1] = s, c
     return T
+
 
 # 把各关节的平移+旋转顺序组合成末端位姿（位置 + 旋转矩阵）
 def _make_fk(joint_angles, up_to_joint=5):
@@ -1199,6 +1337,7 @@ def _make_fk(joint_angles, up_to_joint=5):
         q = float(joint_angles[i])
         T = T @ _make_transform(tx, ty, tz, axis, sign * q)
     return T
+
 
 # 将旋转矩阵表示转换为四元数，便于在仿真/消息中使用（Isaac/ROS 通常用四元数）
 def _rotation_matrix_to_quat(R):
@@ -1230,30 +1369,31 @@ def _rotation_matrix_to_quat(R):
         z = 0.25 * s
     return np.array([w, x, y, z], dtype=np.float32)
 
+
 def euler_from_quaternion(qw, qx, qy, qz):
     """
     从四元数计算欧拉角（roll, pitch, yaw）
     返回角度为弧度制
-    
+
     四元数格式: qw + qx*i + qy*j + qz*k
     """
-    
+
     # Roll (x轴旋转)
     sinr_cosp = 2.0 * (qw * qx + qy * qz)
     cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
     roll = math.atan2(sinr_cosp, cosr_cosp)
-    
+
     # Pitch (y轴旋转) - 使用asin避免数值超出范围
     sinp = 2.0 * (qw * qy - qz * qx)
     # 限制sinp在[-1, 1]范围内防止数值误差
     sinp = max(-1.0, min(1.0, sinp))
     pitch = math.asin(sinp)
-    
+
     # Yaw (z轴旋转)
     siny_cosp = 2.0 * (qw * qz + qx * qy)
     cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
     yaw = math.atan2(siny_cosp, cosy_cosp)
-    
+
     return roll, pitch, yaw
 
 
@@ -1266,22 +1406,24 @@ def _quat_multiply(q1, q2):
     # 提取分量
     w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
     w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-    
+
     # 计算乘积
-    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-    
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+
     # 合并并归一化（防止数值漂移）
     result = torch.stack([w, x, y, z], dim=-1)
     result = result / torch.norm(result, dim=-1, keepdim=True)
-    
+
     return result
+
 
 # =============================================================================
 # Demo 控制和数据生产
 # =============================================================================
+
 
 # demo controller: 键盘控制机械臂关节角度，V 键切换视角，R 键重置
 def demo_control():
@@ -1317,26 +1459,34 @@ def demo_control():
     print("    LEFT/RIGHT - Decrease/Increase joint angle")
     print("    R          - Reset all joints to zero")
     print("  View:")
-    print("    V          - Cycle viewpoints (main -> top -> side -> front -> gripper_cam -> close_up -> main)")
+    print(
+        "    V          - Cycle viewpoints (main -> top -> side -> front -> gripper_cam -> close_up -> main)"
+    )
     print("=" * 50)
-    print(f"[Joint] Selected: {JOINT_NAMES[current_joint_idx]} (index {current_joint_idx})")
+    print(
+        f"[Joint] Selected: {JOINT_NAMES[current_joint_idx]} (index {current_joint_idx})"
+    )
 
     # 主循环
     while simulation_app.is_running():
-        '''
+        """
         Joint mode:
             UP/DOWN    - Select joint
             LEFT/RIGHT - Decrease/Increase joint angle
             R         - Reset all joints to zero
-        '''
+        """
 
         # 选择关节
         if kb.on_press("UP"):
             current_joint_idx = (current_joint_idx - 1) % len(JOINT_NAMES)
-            print(f"[Joint] Selected: {JOINT_NAMES[current_joint_idx]} (index {current_joint_idx})")
+            print(
+                f"[Joint] Selected: {JOINT_NAMES[current_joint_idx]} (index {current_joint_idx})"
+            )
         if kb.on_press("DOWN"):
             current_joint_idx = (current_joint_idx + 1) % len(JOINT_NAMES)
-            print(f"[Joint] Selected: {JOINT_NAMES[current_joint_idx]} (index {current_joint_idx})")
+            print(
+                f"[Joint] Selected: {JOINT_NAMES[current_joint_idx]} (index {current_joint_idx})"
+            )
 
         # 调整关节角度（持续按住生效）
         joint_delta = 0.0
@@ -1364,15 +1514,20 @@ def demo_control():
         # 打印末端位姿（每隔一段时间）
         if joint_delta != 0.0:
             poses = sim.get_current_poses()
-            ee = poses['last_joint']
+            ee = poses["last_joint"]
             angles = sim.get_joint_angles()
-            angles_str = ", ".join(f"{JOINT_NAMES[i]}: {angles[i]:.4f}" for i in range(len(JOINT_NAMES)))
-            print(f"[EE] pos: ({ee['pos'][0]:.4f}, {ee['pos'][1]:.4f}, {ee['pos'][2]:.4f})  "
-                  f"[Joints] {angles_str}")
+            angles_str = ", ".join(
+                f"{JOINT_NAMES[i]}: {angles[i]:.4f}" for i in range(len(JOINT_NAMES))
+            )
+            print(
+                f"[EE] pos: ({ee['pos'][0]:.4f}, {ee['pos'][1]:.4f}, {ee['pos'][2]:.4f})  "
+                f"[Joints] {angles_str}"
+            )
 
     # 清理
     kb.stop()
     # sim.close()
+
 
 def data_produce():
     """Main loop: iterate over episodes, generate trajectories, record data.
@@ -1417,9 +1572,9 @@ def data_produce():
 
         # 2. Randomize object position
         obj_info = sim.randomize_object()
-        object_rot = obj_info['orientation']
-        object_euler = obj_info['euler_angles']
-        object_pos = obj_info['position']
+        object_rot = obj_info["orientation"]
+        object_euler = obj_info["euler_angles"]
+        object_pos = obj_info["position"]
 
         # Settle after object spawn
         for _ in range(5):
@@ -1430,12 +1585,27 @@ def data_produce():
         f = h5py.File(filepath, "w")
 
         max_steps = STEPS_PER_PHASE * 10
-        f.create_dataset("action", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32")
-        f.create_dataset("observation/images/gripper", shape=(0, CAM_HEIGHT, CAM_WIDTH, 3),
-                         maxshape=(max_steps, CAM_HEIGHT, CAM_WIDTH, 3), dtype="uint8")
-        f.create_dataset("observation/state", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32")
-        f.create_dataset("observation/gripper", shape=(0, 1), maxshape=(max_steps, 1), dtype="float32")
-        f.create_dataset("object_pos", shape=(0, 3), maxshape=(max_steps, 3), dtype="float32")
+        f.create_dataset(
+            "action", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32"
+        )
+        f.create_dataset(
+            "observation/images/gripper",
+            shape=(0, CAM_HEIGHT, CAM_WIDTH, 3),
+            maxshape=(max_steps, CAM_HEIGHT, CAM_WIDTH, 3),
+            dtype="uint8",
+        )
+        f.create_dataset(
+            "observation/state", shape=(0, 6), maxshape=(max_steps, 6), dtype="float32"
+        )
+        f.create_dataset(
+            "observation/gripper",
+            shape=(0, 1),
+            maxshape=(max_steps, 1),
+            dtype="float32",
+        )
+        f.create_dataset(
+            "object_pos", shape=(0, 3), maxshape=(max_steps, 3), dtype="float32"
+        )
 
         f.attrs["fps"] = 30
         f.attrs["sim_dt"] = sim._sim_dt
@@ -1447,34 +1617,44 @@ def data_produce():
 
             # 4.5. plan and execute
             fin_flag = False
-            missions = ["move_up", "move_down", "grasp_close", "lift_up", "hold"]
+            missions = ["move_up", "move_down", "grasp_close", "lift_up"]
             while not fin_flag:
                 # 遍历 missions 列表
                 for mission in missions:
                     print(f"  mission: {mission}")
-                    phases = plan_grasp_trajectory(sim, mission, object_pos, object_euler, PLACE_POS)
+                    phases = plan_grasp_trajectory(
+                        sim, mission, object_pos, object_euler, PLACE_POS
+                    )
                     # 5. Execute trajectory and record data
                     for phase in phases:
                         print(f"  Phase: {phase['name']}")
                         for waypoint in phase["waypoints"]:
                             # Set joint targets
-                            target = torch.tensor(waypoint, dtype=torch.float32, device=sim._sim.device)
+                            target = torch.tensor(
+                                waypoint, dtype=torch.float32, device=sim._sim.device
+                            )
                             target[5] = phase["gripper"]
                             sim._target_pos[0] = target
                             sim.step()
                             # Record step data
-                            record_step(f, sim, camera_gripper, target, phase["gripper"])
+                            record_step(
+                                f, sim, camera_gripper, target, phase["gripper"]
+                            )
                     # time.sleep(3)
 
-                
                 fin_flag = True
             grasp_status = check_grasp_success_dual(sim, initial_obj_pos)
 
-
             print(f"    Grasp Detection:")
-            print(f"      - Gripper closed: {grasp_status['gripper_closed']} (angle: {grasp_status['gripper_angle']:.3f})")
-            print(f"      - Object lifted: {grasp_status['object_lifted']} (Δh: {grasp_status['height_delta']:.3f}m)")
-            print(f"      - Object position: [{grasp_status['object_pos'][0]:.3f}, {grasp_status['object_pos'][1]:.3f}, {grasp_status['object_pos'][2]:.3f}]")
+            print(
+                f"      - Gripper closed: {grasp_status['gripper_closed']} (angle: {grasp_status['gripper_angle']:.3f})"
+            )
+            print(
+                f"      - Object lifted: {grasp_status['object_lifted']} (Δh: {grasp_status['height_delta']:.3f}m)"
+            )
+            print(
+                f"      - Object position: [{grasp_status['object_pos'][0]:.3f}, {grasp_status['object_pos'][1]:.3f}, {grasp_status['object_pos'][2]:.3f}]"
+            )
             print(f"      - Grasp SUCCESS: {grasp_status['grasped']}")
 
             # 6. Check final placement success
@@ -1490,7 +1670,9 @@ def data_produce():
 
         if success:
             success_count += 1
-        print(f"  Result: {'SUCCESS' if success else 'FAIL'} ({success_count}/{ep_idx + 1})")
+        print(
+            f"  Result: {'SUCCESS' if success else 'FAIL'} ({success_count}/{ep_idx + 1})"
+        )
 
         if not simulation_app.is_running():
             break
@@ -1504,7 +1686,13 @@ def data_produce():
 
 
 # 按照规则
-def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, object_euler: tuple, place_pos: tuple) -> list[dict]:
+def plan_grasp_trajectory(
+    sim: SimIsaacModel,
+    mission: str,
+    object_pos: tuple,
+    object_euler: tuple,
+    place_pos: tuple,
+) -> list[dict]:
     """Plan a full pick-and-place trajectory as a sequence of phases.
 
     Optimized grasp logic:
@@ -1521,19 +1709,19 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
     Each phase is planned based on the final waypoint of the previous phase,
     ensuring continuous and deterministic trajectory planning without relying
     on real-time servo angles.
-    
-    
+
+
     预先定义好的是这几个任务， TODO 后续改成 vla 规划出来 phases 后面的改为参数形式
     missions = ["move_up", "move_down", "grasp_close", "lift_up", "move_home"]
     """
     phases = []
 
-    grasp_height = max(object_pos[2] , OBJ_Z)
+    grasp_height = max(object_pos[2], OBJ_Z)
     place_height = max(place_pos[2], OBJ_Z)
 
     # Get home position for return trajectory
     home_joints = sim._robot.data.default_joint_pos[0, :6].cpu().tolist()
-    
+
     # 根据 object_rot 确定 物体的旋转角度是多少
 
     yaw = object_euler[2]
@@ -1542,68 +1730,96 @@ def plan_grasp_trajectory(sim: SimIsaacModel, mission: str, object_pos: tuple, o
     # 将 yaw 归一化到 [-π, π] 范围内
     yaw = (yaw + math.pi) % (2 * math.pi) - math.pi
 
-
     if mission == "move_up":
         # Phase 1: Approach (move to pre-grasp position above object)
-        pre_grasp_pos = (object_pos[0] + GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + PRE_GRASP_HEIGHT_OFFSET)
+        pre_grasp_pos = (
+            object_pos[0] + GRIPPER_OFFSET * math.cos(yaw),
+            object_pos[1] + GRIPPER_OFFSET * math.sin(yaw),
+            grasp_height + PRE_GRASP_HEIGHT_OFFSET,
+        )
         # 进行一个旋转 yaw 角度的偏移，确保和物体的朝向一致，增加抓取成功率
 
-
-        pre_grasp_traj = sim.isaac_ik_trace(pre_grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE)
-        phases.append({
-            "name": "approach",
-            "waypoints": pre_grasp_traj,
-            "gripper": GRIPPER_OPEN,
-        })
+        pre_grasp_traj = sim.isaac_ik_trace(
+            pre_grasp_pos, rot_rad=yaw, steps=STEPS_PER_PHASE
+        )
+        phases.append(
+            {
+                "name": "approach",
+                "waypoints": pre_grasp_traj,
+                "gripper": GRIPPER_OPEN,
+            }
+        )
     elif mission == "move_down":
         # Phase 2: Descend to grasp position (gripper remains open)
         # 保持 move_up 阶段已设置的旋转角度，不再额外旋转（rot_rad=0 或不传）
-        grasp_pos = (object_pos[0]+ GRIPPER_OFFSET * math.cos(yaw), object_pos[1] + GRIPPER_OFFSET * math.sin(-yaw), grasp_height + GRIPPER_HEIGHT)
+        grasp_pos = (
+            object_pos[0] + GRIPPER_OFFSET * math.cos(yaw),
+            object_pos[1] + GRIPPER_OFFSET * math.sin(yaw),
+            grasp_height + GRIPPER_HEIGHT,
+        )
         grasp_traj = sim.isaac_ik_trace(grasp_pos, steps=STEPS_PER_PHASE)
-        phases.append({
-            "name": "descend",
-            "waypoints": grasp_traj,
-            "gripper": GRIPPER_OPEN,
-        })
+        phases.append(
+            {
+                "name": "descend",
+                "waypoints": grasp_traj,
+                "gripper": GRIPPER_OPEN,
+            }
+        )
     elif mission == "grasp_close":
         # Phase 3: Close gripper to grasp object
         # Use the final waypoint from Phase 2 (descend)
         joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()
-        phases.append({
-            "name": "close_gripper",
-            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE * 3)],
-            "gripper": GRIPPER_GRASP,
-        })
+        phases.append(
+            {
+                "name": "close_gripper",
+                "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE // 2)],
+                "gripper": GRIPPER_GRASP,
+            }
+        )
     elif mission == "lift_up":
         # Phase 4: Lift object up
         # Based on the final waypoint of Phase 3 (which is same as Phase 2's end position)
-        lift_pos = (object_pos[0] , object_pos[1] , grasp_height + LIFT_HEIGHT)
+        lift_pos = (object_pos[0], object_pos[1], grasp_height + LIFT_HEIGHT)
         lift_traj = sim.isaac_ik_trace(lift_pos, steps=STEPS_PER_PHASE)
-        phases.append({
-            "name": "lift",
-            "waypoints": lift_traj,
-            "gripper": GRIPPER_GRASP,
-        })
+        phases.append(
+            {
+                "name": "lift",
+                "waypoints": lift_traj,
+                "gripper": GRIPPER_GRASP,
+            }
+        )
     elif mission == "hold":
         joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()
-        phases.append({
-            "name": "hold",
-            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE*2)],
-            "gripper": GRIPPER_GRASP,
-        })
+        phases.append(
+            {
+                "name": "hold",
+                "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE * 2)],
+                "gripper": GRIPPER_GRASP,
+            }
+        )
     elif mission == "grasp_open":
         # 只打开夹爪 位置不改变
         # 获取 关节角度值
-        joints_at_grasp = sim._robot.data.joint_pos[0, :6].cpu().tolist()  # Get first 6 joints (exclude gripper)
-        phases.append({
-            "name": "grasp_open",
-            "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
-            "gripper": GRIPPER_OPEN,
-        })
+        joints_at_grasp = (
+            sim._robot.data.joint_pos[0, :6].cpu().tolist()
+        )  # Get first 6 joints (exclude gripper)
+        phases.append(
+            {
+                "name": "grasp_open",
+                "waypoints": [joints_at_grasp for _ in range(STEPS_PER_PHASE)],
+                "gripper": GRIPPER_OPEN,
+            }
+        )
     return phases
 
 
-def record_step(f: h5py.File, sim: SimIsaacModel, camera_gripper: Camera, action: torch.Tensor, gripper_val: float):
+def record_step(
+    f: h5py.File,
+    sim: SimIsaacModel,
+    camera_gripper: Camera,
+    action: torch.Tensor,
+    gripper_val: float,
+):
     """Record one timestep of data into the HDF5 file."""
     # Read current state
     joint_state = sim._robot.data.joint_pos[0, :6].cpu().numpy()
@@ -1629,9 +1845,12 @@ def record_step(f: h5py.File, sim: SimIsaacModel, camera_gripper: Camera, action
         ds[-1] = data
 
 
-def check_grasp_success_dual(sim: SimIsaacModel, initial_obj_pos: np.ndarray,
-                             gripper_closed_threshold: float = 0.02,
-                             height_threshold: float = 0.05) -> dict:
+def check_grasp_success_dual(
+    sim: SimIsaacModel,
+    initial_obj_pos: np.ndarray,
+    gripper_closed_threshold: float = 0.02,
+    height_threshold: float = 0.05,
+) -> dict:
     """Check if object is grasped using dual criteria:
 
     1. Gripper state: Check if gripper is closed (indicating contact with object)
@@ -1666,36 +1885,41 @@ def check_grasp_success_dual(sim: SimIsaacModel, initial_obj_pos: np.ndarray,
     grasped = gripper_closed and object_lifted
 
     return {
-        'grasped': grasped,
-        'gripper_closed': gripper_closed,
-        'object_lifted': object_lifted,
-        'gripper_angle': gripper_angle,
-        'object_pos': current_obj_pos,
-        'height_delta': height_delta,
+        "grasped": grasped,
+        "gripper_closed": gripper_closed,
+        "object_lifted": object_lifted,
+        "gripper_angle": gripper_angle,
+        "object_pos": current_obj_pos,
+        "height_delta": height_delta,
     }
 
 
-def check_grasp_success(sim: SimIsaacModel, place_pos: tuple, threshold: float = 0.05) -> bool:
+def check_grasp_success(
+    sim: SimIsaacModel, place_pos: tuple, threshold: float = 0.05
+) -> bool:
     """Check if the object was successfully placed near the target position."""
     cube = sim._scene["cube"]
     obj_pos = cube.data.root_pos_w[0].cpu().numpy()
     place_pos_np = np.array(place_pos, dtype=np.float32)
     distance = np.linalg.norm(obj_pos - place_pos_np)
 
-    return bool(distance < threshold and obj_pos[2] >= OBJ_Z * 0.8)
+    return obj_pos[2] > OBJ_Z * 1.1
+    # return bool(distance < threshold and obj_pos[2] >= OBJ_Z * 0.8)
+
 
 CONTROL_MODE = "tor"
-    
+
+
 def demo_remote_control():
     # 连接 upd 传输
     # 192.168.2.2:3456 从这个端口中接收数据
     # 接受该端口发送的 关节角度数据,写入到仿真中的目标关节位置
     import socket
     import json
+
     IP = "0.0.0.0"
     PORT = 3456
-    
-    
+
     # 初始化模拟器
     sim = SimIsaacModel(URDF_PATH)
 
@@ -1708,7 +1932,7 @@ def demo_remote_control():
         data, addr = sock.recvfrom(4096)  # 接收数据
         try:
             msg = json.loads(data.decode("utf-8"))
-            
+
             if CONTROL_MODE == "tor":
                 pos = msg.get("position") or msg.get("pos")
                 rot = msg.get("orientation") or msg.get("quat")
@@ -1723,26 +1947,28 @@ def demo_remote_control():
                 # 处理msg
                 joint_angles = msg["rad_angles"]
                 print(f"Joint angles: {joint_angles}")
-            
+
                 # 将关节角度写入仿真
-                target = torch.tensor(joint_angles, dtype=torch.float32, device=sim._sim.device)
+                target = torch.tensor(
+                    joint_angles, dtype=torch.float32, device=sim._sim.device
+                )
                 sim._target_pos[0] = target
                 sim.step()
-            
+
             # TODO 当输入 R 时重置 cube 位置
             if kb.on_press("R"):
                 sim.reset()
                 print("[INFO]: Reset all joints to default position")
-            
+
         except Exception as e:
             print(f"Error decoding message: {e}")
     kb.stop()
-    
+
 
 if __name__ == "__main__":
     # demo_control()
-    # data_produce()
-    demo_remote_control()
+    data_produce()
+    # demo_remote_control()
     # 最后关闭
     print("\n[INFO]: Simulation finished, closing application.")
     simulation_app.close()
