@@ -859,22 +859,21 @@ class SimIsaacModel:
             print(f"[Viewport] Could not find window '{window_name}' in workspace")
 
     # 切换稳定模式（增加阻尼，减少晃动）
-    def toggle_stable_mode(self, enable):
-        self._stable_mode = enable
-        if enable:
-            # 增加阻尼和刚度以减少晃动
-            stiffness = 800.0
-            damping = 80.0
-        else:
-            stiffness = 400.0
-            damping = 40.0
-
-        # 通过写入 actuator 的属性来调整 PD 增益
-        self._robot.actuators["all_joints"].stiffness[:] = stiffness
-        self._robot.actuators["all_joints"].damping[:] = damping
-        print(
-            f"[Stable] {'Enabled' if enable else 'Disabled'} (stiffness={stiffness}, damping={damping})"
-        )
+    # def toggle_stable_mode(self, enable):
+    #     self._stable_mode = enable
+    #     if enable:
+    #         # 增加阻尼和刚度以减少晃动
+    #         stiffness = 800.0
+    #         damping = 80.0
+    #     else:
+    #         stiffness = 400.0
+    #         damping = 40.0
+    #     # 通过写入 actuator 的属性来调整 PD 增益
+    #     self._robot.actuators["all_joints"].stiffness[:] = stiffness
+    #     self._robot.actuators["all_joints"].damping[:] = damping
+    #     print(
+    #         f"[Stable] {'Enabled' if enable else 'Disabled'} (stiffness={stiffness}, damping={damping})"
+    #     )
 
     def joint_angles_to_poses(
         self,
@@ -1441,7 +1440,7 @@ def demo_control():
     # })
 
     # 切换稳定模式
-    sim.toggle_stable_mode(True)
+    # sim.toggle_stable_mode(True)
 
     # 监听键盘输入
     kb = KeyboardController()
@@ -1966,8 +1965,8 @@ def demo_remote_control():
 
 
 if __name__ == "__main__":
-    # demo_control()
-    data_produce()
+    demo_control()
+    # data_produce()
     # demo_remote_control()
     # 最后关闭
     print("\n[INFO]: Simulation finished, closing application.")
