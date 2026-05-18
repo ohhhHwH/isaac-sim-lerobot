@@ -86,6 +86,72 @@ main()
 python isaac_kocj.py
 ```
 
+
+# Piper 
+
+
+真机 → 仿真 数据转换结构
+1. 关节角度 (Joint Angles)
+
+真机 SDK 原始值 (GetArmJointMsgs)
+    │
+    │  joint_{i} 单位: 0.001° (千分之一度, millidegrees)
+    │
+    ▼
+录制存储值 (CSV)
+    │  joint_{i} / 1000 * 0.0174533
+    │  = millidegrees → degrees → radians
+    │  单位: rad (弧度)
+    │
+    ▼
+回放到真机
+    │  rad / 0.0174533 * 1000
+    │  = radians → degrees → millidegrees
+    │  传入 piper.JointCtrl(*joints)
+    │
+    ▼
+写入仿真 (Isaac Sim)
+    │  CSV中的值已经是 rad，可直接写入
+    │  joint_pos_t[0, 0:6] = rads_from_csv
+    │  无需额外转换
+2. 夹爪 (Gripper)
+
+真机 SDK 原始值 (GetArmGripperMsgs)
+    │
+    │  grippers_angle 单位: 微米 (μm, 1e-6 m)
+    │
+    ▼
+录制存储值 (CSV)
+    │  grippers_angle / 1e6
+    │  单位: 米 (m), 表示夹爪开口距离
+    │  例: 0.070 = 70mm 全开, 0.0 = 闭合
+    │
+    ▼
+回放到真机
+    │  pos[-1] * 1e6 → 微米
+    │  传入 piper.GripperCtrl(round(pos[-1] * 1e6), ...)
+    │
+    ▼
+写入仿真 (Isaac Sim)
+    │  仿真夹爪是旋转关节，单位 rad
+    │  需要映射: 开口距离(m) → 关节弧度
+    │  gripper_rad = (csv_value / 0.070) * GRIPPER_MAX_RAD
+    │  其中 0.070m = 最大开口, GRIPPER_MAX_RAD = 0.04 rad
+3. 总结对照表
+数据	SDK 原始	CSV 存储	仿真写入
+关节 1-6	0.001° (int)	rad (float)	rad — 直接用
+夹爪	μm (int)	m (float)	rad — 需线性映射
+4. 当前 set_arm_angles 的输入约定
+如果输入来自 CSV 录制文件（弧度），应直接写入仿真，不需要 math.radians() 转换。当前函数接受度数输入，所以从 CSV 读取时需要注意：
+
+
+从 CSV 读取（弧度） → 直接写入仿真
+joint_pos_t[0, :6] = torch.tensor(csv_row[:6])  # 已经是 rad
+
+从用户输入（度数） → 需要转换
+joint_pos_t[0, :6] = torch.tensor([math.radians(a) for a in angles_deg])
+
+
 # TODO
 
 ADD Multi-view port - def add_viewport(self, view_name):

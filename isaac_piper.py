@@ -2,6 +2,8 @@
 import argparse
 import os
 
+from collections.abc import Sequence
+
 # 加载 isaaclab 运行环境
 from isaaclab.app import AppLauncher
 
@@ -16,9 +18,7 @@ simulation_app = app_launcher.app
 import numpy as np
 import torch
 import carb
-import math
 import os
-import time
 
 # isaacsim 依赖库
 import omni
@@ -46,7 +46,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 # isaaclab utils - 工具函数和配置类
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply, subtract_frame_transforms
+from isaaclab.utils.math import quat_apply, subtract_frame_transforms, compute_pose_error
 # isaaclab sensors - 传感器相关的配置类和基类
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sensors import CameraCfg, Camera
@@ -60,18 +60,19 @@ DEBUG_MODE = False  # 调试模式
 # 启用后方块位置固定
 # 启用后输出日志
 
-USD_PATH = "/home/hyl/isaac-sim-lerobot/assets/piper_isaac_sim/USD/piper_h_v1.usd"
+USD_PATH = "/home/hyl/isaac-sim-lerobot/assets/piper_isaac_sim/USD/piper_v2_robot.usd"
 OBJ_PATH = "/home/hyl/isaac-sim-lerobot/assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd"
 
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "joint8"]
-BODY_NAMES = ["base_link", "Link1", "Link2", "Link3", "Link4", "Link5", "Link6", "Link7", "Link8"]
+BODY_NAMES = ["arm_base", "link1", "link2", "link3", "link4", "link5", "link6", "link7", "link8"]
 GRIPPER_JOINT_NAMES = ["joint7", "joint8"]
 
 # camera_link 是什么？
-# Available strings: ['base_link', 'Link1', 'Link2', 'Link3', 'Link4', 'Link5', 'Link6', 'camera_link', 'Link7', 'Link8']
+# Available strings: ['arm_base', 'link1', 'link2', 'link3', 'link4', 'link5', 'link6', 'camera_link', 'link7', 'link8']
 
 
 ANGLE_STEP = 0.05
+PIPER_NAME = "piper"
 
 class KeyboardController:
     def __init__(self):
@@ -119,10 +120,6 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
             ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=True,
-                fix_root_link=True,
-            ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
         actuators={
@@ -156,12 +153,12 @@ class PiperSim:
     def __init__(self, scene: InteractiveScene):
         self._scene = scene
         self._sim = scene.sim
-        self._robot: Articulation = scene["piper"]
+        self._robot: Articulation = scene[PIPER_NAME]
         # 初始化逆运动学控制器
         diff_ik_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
         self._ik_controller = DifferentialIKController(diff_ik_cfg, num_envs=1, device=self._sim.device)
         # 创建 SceneEntityCfg / ee 索引
-        self._robot_entity_cfg = SceneEntityCfg("piper", joint_names=["joint[1-6]"], body_names=["Link6"])
+        self._robot_entity_cfg = SceneEntityCfg(PIPER_NAME, joint_names=["joint[1-6]"], body_names=["link6"])
         self._robot_entity_cfg.resolve(self._scene)
         if self._robot.is_fixed_base:
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0] - 1
@@ -176,86 +173,180 @@ class PiperSim:
         ecfg = self._robot_entity_cfg
         ee_pose_w = self._robot.data.body_pose_w[:, ecfg.body_ids[0]]
         return ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+
+    # link6 仿真坐标系相对真机末端有 +90° Z 旋转偏移，需补偿
+    _EE_OFFSET_QUAT = torch.tensor([[0.7071068, 0.0, 0.0, -0.7071068]])
+
+    def get_arm_pos(self):
+        """获取末端位姿（base frame），返回 (pos[3], quat_wxyz[4])。
+        已补偿 link6 与真机末端的 90° Z 偏移。四元数统一为 w>=0。"""
+        root_pose_w = self._robot.data.root_pose_w
+        ecfg = self._robot_entity_cfg
+        ee_pose_w = self._robot.data.body_pose_w[:, ecfg.body_ids[0]]
+        ee_pos_b, ee_quat_b = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7],
+            ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+        )
+        # 补偿 Z 轴 90° 偏移: Q_real = Q_sim * Q_offset_inv
+        offset = self._EE_OFFSET_QUAT.to(ee_quat_b.device)
+        ee_quat_b = self._quat_mul(ee_quat_b, offset)
+        pos = ee_pos_b.squeeze(0).cpu().tolist()
+        quat = ee_quat_b.squeeze(0).cpu().tolist()
+        if quat[0] < 0:
+            quat = [-v for v in quat]
+        return pos, quat
+
+    @staticmethod
+    def _quat_mul(a, b):
+        """批量四元数乘法 [w,x,y,z], shape (N,4)"""
+        w1, x1, y1, z1 = a[:, 0:1], a[:, 1:2], a[:, 2:3], a[:, 3:4]
+        w2, x2, y2, z2 = b[:, 0:1], b[:, 1:2], b[:, 2:3], b[:, 3:4]
+        return torch.cat([
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        ], dim=1)
+
+    def get_arm_pos_euler(self):
+        """获取末端位姿（base frame），返回 (pos[3], euler_xyz_deg[3])。
+        euler 为 extrinsic XYZ 度数，与 Piper SDK RX/RY/RZ 一致。"""
+        pos, quat = self.get_arm_pos()
+        w, x, y, z = quat
+        # extrinsic XYZ euler from quaternion (wxyz)
+        rx = np.arctan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
+        sy = 2*(w*y - z*x)
+        sy = np.clip(sy, -1.0, 1.0)
+        ry = np.arcsin(sy)
+        rz = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+        return pos, [np.degrees(rx), np.degrees(ry), np.degrees(rz)]
     
-    # 包括关节角度
-    def set_arm(self, joint_pos):
-        self._robot.set_joint_position_target(joint_pos)
-        # 更新仿真
+    GRIPPER_MAX_OPEN_M = 0.070  # 夹爪最大开口 70mm = 0.07m
+    GRIPPER_MAX_RAD = 0.04      # 仿真中夹爪关节最大弧度
+
+    def set_arm_angles(
+        self,
+        angles_rad: Sequence[float | int] | None = None,
+        gripper_open_m: float | int | None = None,
+    ) -> bool:
+        """
+        设置关节角度和夹爪开合，与真机 SDK 录制格式一致。
+
+        Args:
+            angles_rad: 6个关节角度，单位弧度（与 CSV 录制值一致：SDK millideg / 1000 * 0.0174533）
+            gripper_open_m: 夹爪开口距离，单位米（与 CSV 录制值一致：SDK μm / 1e6）
+        """
+        joint_pos_t = self._robot.data.joint_pos.clone()
+
+        if angles_rad is not None:
+            rads = torch.tensor(list(angles_rad), dtype=torch.float32, device=self._sim.device)
+            joint_pos_t[0, :len(rads)] = rads
+
+        if gripper_open_m is not None:
+            g = (float(gripper_open_m) / self.GRIPPER_MAX_OPEN_M) * self.GRIPPER_MAX_RAD
+            g = max(0.0, min(self.GRIPPER_MAX_RAD, g))
+            joint_pos_t[0, 6] = g
+            joint_pos_t[0, 7] = g
+
+        joint_vel = torch.zeros_like(joint_pos_t)
+        self._robot.write_joint_state_to_sim(joint_pos_t, joint_vel)
+        self._robot.set_joint_position_target(joint_pos_t)
         self._scene.write_data_to_sim()
         self._sim.step()
         self._scene.update(self._sim.cfg.dt)
+        return True
 
-    # 末端位姿，不包括关节角度
-    def set_arm_pos(self, target_pos, target_rot, gripper_ang = 0.04):
-        # pos(3) 单位 m
-        # root_pose shape (N,7) = [pos(3), quat(w,x,y,z)(4)]
-        pos = self.isaac_ik_trace(target_pos, target_rot, steps=1)
-        target = torch.tensor(pos[0], dtype=torch.float32)
-        if gripper_ang is not None:
-            target[5] = gripper_ang # 保持当前夹爪状态
-        self.set_arm(target)
+    # link6 仿真坐标系相对真机末端有 +90° Z 旋转偏移的逆（用于 set_arm_pos 输入转换）
+    _EE_OFFSET_QUAT_INV = torch.tensor([[0.7071068, 0.0, 0.0, 0.7071068]])
 
-    def isaac_ik_trace(self, pos, quat=None, steps=1):
+    # 末端位姿（base frame），与真机 SDK GetArmEndPoseMsgs 一致
+    def set_arm_pos(self, target_pos_b, target_quat_b, gripper_open_m=0.070, solve_steps=1):
         """
-        基于 Link6 末端位姿，用 DifferentialIK 求解关节角度。
+        IK 求解并驱动到目标末端位姿。
 
         Args:
-            pos: 目标末端位置 (3,)，world frame，单位 m
-            quat: 目标末端四元数 (4,) (w,x,y,z)，world frame。None 则保持当前朝向
-            steps: 插值步数，>=1
+            target_pos_b: 末端位置 [x,y,z]，base frame，单位米
+            target_quat_b: 末端姿态四元数 [w,x,y,z]，base frame（真机坐标系）
+            gripper_open_m: 夹爪开口距离，单位米
+            solve_steps: IK 求解步数，默认1
+        """
+        # 将真机坐标系四元数转为仿真 link6 坐标系: Q_sim = Q_real * Q_offset_inv^-1 = Q_real * Q_offset
+        device = self._sim.device
+        quat_t = torch.tensor(target_quat_b, dtype=torch.float32, device=device).reshape(1, 4)
+        offset_inv = self._EE_OFFSET_QUAT_INV.to(device)
+        quat_sim = self._quat_mul(quat_t, offset_inv)
+        target_quat_sim = quat_sim.squeeze(0).tolist()
+
+        trajectory = self.isaac_ik_trace(target_pos_b, target_quat_sim, steps=solve_steps)
+
+        for joint_angles in trajectory:
+            self.set_arm_angles(angles_rad=joint_angles[:6], gripper_open_m=gripper_open_m)
+
+    def isaac_ik_trace(self, target_pos_b, target_quat_b, steps=1):
+        """
+        基于 Link6 末端位姿（base frame），用迭代 DifferentialIK 求解关节角度。
+        每步都通过仿真更新 Jacobian 以保证位置和姿态同时收敛。
+
+        Args:
+            target_pos_b: 目标末端位置 [x,y,z]，base frame，单位米
+            target_quat_b: 目标末端四元数 [w,x,y,z]，base frame
+            steps: 插值步数
 
         Returns:
-            list[list[float]]: 长度为 steps 的列表，每项是完整关节目标向量 (8,)
+            list[list[float]]: 长度为 steps 的轨迹点，每项为 6 个关节弧度
         """
         steps = max(int(steps), 1)
         device = self._sim.device
         ecfg = self._robot_entity_cfg
 
-        pos_t = torch.tensor(pos, dtype=torch.float32, device=device).unsqueeze(0)
-
-        ee_pose_w = self._robot.data.body_pose_w[:, ecfg.body_ids[0]]
-        ee_pos_w = ee_pose_w[:, 0:3]
-        ee_quat_w = ee_pose_w[:, 3:7]
-
-        if quat is None:
-            quat_t = ee_quat_w.clone()
-        else:
-            quat_t = torch.tensor(quat, dtype=torch.float32, device=device).unsqueeze(0)
+        pos_b = torch.tensor(target_pos_b, dtype=torch.float32, device=device).reshape(1, 3)
+        quat_b = torch.tensor(target_quat_b, dtype=torch.float32, device=device).reshape(1, 4)
 
         root_pose_w = self._robot.data.root_pose_w
-        root_pos_w = root_pose_w[:, 0:3]
-        root_quat_w = root_pose_w[:, 3:7]
-
-        target_pos_b, target_quat_b = subtract_frame_transforms(
-            root_pos_w, root_quat_w, pos_t, quat_t
+        ee_pose_w = self._robot.data.body_pose_w[:, ecfg.body_ids[0]]
+        ee_pos_b_start, ee_quat_b_start = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7],
+            ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
         )
-        ee_pos_b, ee_quat_b = subtract_frame_transforms(
-            root_pos_w, root_quat_w, ee_pos_w, ee_quat_w
-        )
-
-        full_joint_pos = self._robot.data.joint_pos.clone()
-        arm_joint_pos = full_joint_pos[:, ecfg.joint_ids]
-        jacobian = self._robot.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, ecfg.joint_ids]
 
         trajectory = []
         for i in range(steps):
             alpha = (i + 1) / steps
-            interp_pos = ee_pos_b + alpha * (target_pos_b - ee_pos_b)
-            interp_quat = target_quat_b
-
-            ik_command = torch.cat([interp_pos, interp_quat], dim=1)
+            interp_pos_b = ee_pos_b_start + alpha * (pos_b - ee_pos_b_start)
+            ik_command = torch.cat([interp_pos_b, quat_b], dim=1)
             self._ik_controller.reset()
             self._ik_controller.set_command(ik_command)
 
-            arm_joint_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, arm_joint_pos)
+            # 迭代求解当前子目标（位置+姿态收敛）
+            for _ in range(200):
+                ee_pose_w = self._robot.data.body_pose_w[:, ecfg.body_ids[0]]
+                ee_pos_b, ee_quat_b = subtract_frame_transforms(
+                    root_pose_w[:, 0:3], root_pose_w[:, 3:7],
+                    ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+                )
 
-            full_target = full_joint_pos.clone()
-            full_target[:, ecfg.joint_ids] = arm_joint_des
-            trajectory.append(full_target.squeeze(0).tolist())
+                pos_error, rot_error = compute_pose_error(
+                    ee_pos_b, ee_quat_b, interp_pos_b, quat_b, rot_error_type="axis_angle"
+                )
+                pos_err = torch.norm(pos_error).item()
+                rot_err = torch.norm(rot_error).item()
 
-            arm_joint_pos = arm_joint_des
-            ee_pos_b = interp_pos
-            ee_quat_b = interp_quat
+                if pos_err < 0.001 and rot_err < 0.01:
+                    break
+
+                jacobian = self._robot.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, ecfg.joint_ids]
+                joint_pos = self._robot.data.joint_pos[:, ecfg.joint_ids]
+                arm_joint_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+
+                full_target = self._robot.data.joint_pos.clone()
+                full_target[:, ecfg.joint_ids] = arm_joint_des
+                self._robot.write_joint_state_to_sim(full_target, torch.zeros_like(full_target))
+                self._robot.set_joint_position_target(full_target)
+                self._scene.write_data_to_sim()
+                self._sim.step()
+                self._scene.update(self._sim.cfg.dt)
+
+            trajectory.append(self._robot.data.joint_pos[0, ecfg.joint_ids].tolist())
 
         return trajectory
 
@@ -264,36 +355,67 @@ def main():
     pass
 
 # Rx = roll, Ry = pitch, Rz = yaw
-def quat_from_euler(pitch, roll, yaw):
-    cy = np.cos(yaw * 0.5)
-    sy = np.sin(yaw * 0.5)
-    cp = np.cos(pitch * 0.5)
-    sp = np.sin(pitch * 0.5)
-    cr = np.cos(roll * 0.5)
-    sr = np.sin(roll * 0.5)
-    q0 = cy * cp * cr + sy * sp * sr
-    q1 = cy * sp * cr + sy * cp * sr
-    q2 = sy * cp * cr - cy * sp * sr
-    q3 = cy * cp * sr - sy * sp * cr
-    return np.array([q0, q1, q2, q3])
+def quat_from_euler_xyz(rx, ry, rz):
+    """从 extrinsic XYZ Euler 角（弧度）转为四元数 [w, x, y, z]。
+    与 Piper SDK GetArmEndPoseMsgs 的 RX/RY/RZ 对应。"""
+    cx, sx = np.cos(rx / 2), np.sin(rx / 2)
+    cy, sy = np.cos(ry / 2), np.sin(ry / 2)
+    cz, sz = np.cos(rz / 2), np.sin(rz / 2)
+    w = cx * cy * cz + sx * sy * sz
+    x = sx * cy * cz - cx * sy * sz
+    y = cx * sy * cz + sx * cy * sz
+    z = cx * cy * sz - sx * sy * cz
+    return np.array([w, x, y, z])
 
 def euler_from_quat(q):
-    q0, q1, q2, q3 = q
-    roll = np.arctan2(2*(q0*q1 + q2*q3), 1 - 2*(q1*q1 + q2*q2))
-    pitch = np.arcsin(2*(q0*q2 - q3*q1))
-    yaw = np.arctan2(2*(q0*q3 + q1*q2), 1 - 2*(q2*q2 + q3*q3))
-    return pitch, roll, yaw
+    """四元数 [w,x,y,z] 转 extrinsic XYZ euler (rx, ry, rz) 弧度。"""
+    w, x, y, z = q
+    rx = np.arctan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
+    sy = 2*(w*y - z*x)
+    sy = np.clip(sy, -1.0, 1.0)
+    ry = np.arcsin(sy)
+    rz = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+    return rx, ry, rz
 
 def normalize_quat(q):
     return q / np.linalg.norm(q)
 
+def euler_zyx_to_xyz(euler_zyx_deg):
+    """将外部 Piper SDK 的 extrinsic ZYX 欧拉角(度) 转为 get_arm_pos_euler() 的 extrinsic XYZ 欧拉角(度)。
+    输入顺序 [rz, ry, rx]（scipy as_euler("zyx") 的输出格式）。"""
+    rz, ry, rx = np.radians(euler_zyx_deg)
+    # extrinsic ZYX: Q = Qx * Qy * Qz (右乘顺序)
+    # 等价于 intrinsic XYZ: Q = Qx * Qy * Qz
+    # 直接用 quat_from_euler_xyz(rx, ry, rz) 即可，因为 extrinsic XYZ 和 extrinsic ZYX 的区别在于角度赋值
+    # 正确做法：构建旋转 R = Rx(rx) * Ry(ry) * Rz(rz) 对应 extrinsic ZYX
+    qx = np.array([np.cos(rx/2), np.sin(rx/2), 0, 0])
+    qy = np.array([np.cos(ry/2), 0, np.sin(ry/2), 0])
+    qz = np.array([np.cos(rz/2), 0, 0, np.sin(rz/2)])
+    # extrinsic ZYX: 先Z再Y再X => Q = Qx * Qy * Qz
+    q = quat_mul(quat_mul(qx, qy), qz)
+    if q[0] < 0:
+        q = -q
+    erx, ery, erz = euler_from_quat(q)
+    return [np.degrees(erx), np.degrees(ery), np.degrees(erz)]
+
+def quat_mul(a, b):
+    """四元数乘法 [w,x,y,z]"""
+    w1, x1, y1, z1 = a
+    w2, x2, y2, z2 = b
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ])
+
 def test_ik():
-    # 单位 mm   角度单位 °
-    # [x, y, z, Rx, Ry, Rz]
-    # 321 -10 124 177 8 174 - 向前抓
-    # 47 -4 172 170 68 173 - Home位
-    # 31 -260 127 177 -4 81 - 向右抓
-    # -1 53 177 128 72 141 - home 向左
+
+    # 6个关节角度 + 夹爪开合 ； 末端位姿 [x, y, z, Rx, Ry, Rz]
+    
+    # 关节角度: ([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.99) 末端位姿: [[0.06, 0.0, 0.21], [0.0, 85.0, -0.0]]
+    # 关节角度: ([45.01, 93.744, -57.566, 0.0, 58.702, 74.98], 0.0) 末端位置: [[0.2, 0.2, 0.2], [-150.03, 0.09, -179.91]]
+    # 关节角度: ([0.0, 3.243, 0.0, 0.0, 0.0, 0.0], 0.99) 末端位置: [[0.06, 0.0, 0.21], [0.0, 88.24, -0.0]]
     
     sim_cfg = sim_utils.SimulationCfg(
         dt=1.0 / 120.0, # 120Hz 更新频率
@@ -308,19 +430,112 @@ def test_ik():
     piper = PiperSim(scene)
     
     # 测试 IK , 循环
-    targets = [
-        [0.321, -0.010, 0.124, 177, 8, 174], # 向前抓
-        [0.047, -0.004, 0.172, 170, 68, 173], # Home位
-        [0.031, -0.260, 0.127, 177, -4, 81], # 向右抓
-        [-0.001, 0.053, 0.177, 128, 72, 141], # home 向左
+
+    # XJY 读取时关节角度除了个 1000 所以 targets_ang 要 *1000 才是 GetArmJointMsgs 的原始值
+    """
+        joints = self.piper.GetArmJointMsgs()
+        angles_deg = [
+            joints.joint_state.joint_1 / self.FACTOR,
+            ...
+        ]
+        
+        
+        end_pose = self.piper.GetArmEndPoseMsgs().end_pose
+        return (
+            np.array(
+                [end_pose.X_axis, end_pose.Y_axis, end_pose.Z_axis],
+                dtype=np.float32,
+            )
+            / self.FACTOR # FACTOR= 1000
+            / 1000.0
+        )
+        
+        end_pose = self.piper.GetArmEndPoseMsgs().end_pose
+        return R.from_euler(
+            "xyz",
+            np.array(
+                [end_pose.RX_axis, end_pose.RY_axis, end_pose.RZ_axis],
+                dtype=np.float32,
+            )
+            / self.FACTOR, # FACTOR= 1000
+            degrees=True,
+        ).as_euler("zyx", degrees=True)
+    
+    """
+    targets_ang = [
+        # [joint1-6 rad, gripper_open_m] — 与 CSV 录制格式一致
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.070],
+        [0.7855, 1.6362, -1.0047, 0.0, 1.0245, 1.3087, 0.0],
+        [0.0, 0.0566, 0.0, 0.0, 0.0, 0.0, 0.070]
     ]
+    targets_end = [ # zyx
+        [[0.06, 0.0, 0.21], [0.0, 85.0, -0.0]],
+        [[0.2, 0.2, 0.2], [-150.03, 0.09, -179.91]],
+        [[0.06, 0.0, 0.21], [0.0, 88.24, -0.0]],
+    ]
+    
     while simulation_app.is_running():
-        for target in targets:
-            pos = target[:3]
-            rot_euler = target[3:]
-            rot_quat = quat_from_euler(*np.radians(rot_euler))
-            piper.set_arm_pos(pos, rot_quat, gripper_ang=0.04)
-            time.sleep(2.0)  # 等待 2 秒观察结果
+        for i, (ang, end) in enumerate(zip(targets_ang, targets_end)):
+            # 1. 移动到 targets_ang
+            piper.set_arm_angles(angles_rad=ang[:6], gripper_open_m=ang[6])
+            print(f"\n===== Target {i} =====")
+            print(f"设定关节角(rad): {ang[:6]}")
+
+            # 2. 获取末端位姿
+            pos, quat = piper.get_arm_pos()
+            pos_euler, euler = piper.get_arm_pos_euler()
+            print(f"get_arm_pos()       -> pos={pos}, quat={quat}")
+            print(f"get_arm_pos_euler() -> pos={pos_euler}, euler={euler}")
+
+            # 3. 对比 get_arm_pos_euler() 与 targets_end-> targets_xyz
+            expected_pos, expected_euler = end
+            converted_euler = euler_zyx_to_xyz(expected_euler)
+            print(f"targets_end(ZYX)    -> pos={expected_pos}, euler={expected_euler}")
+            print(f"targets_end转XYZ    -> euler={[round(e,2) for e in converted_euler]}")
+            print(f"get_arm_pos_euler() -> euler={[round(e,2) for e in euler]}")
+            print(f"  pos误差: {[round(a-b,4) for a,b in zip(pos_euler, expected_pos)]}")
+            print(f"  euler误差(转换后): {[round(a-b,2) for a,b in zip(euler, converted_euler)]}")
+
+            # 4. 对比 get_arm_pos_euler() + quat_from_euler_xyz() 与 get_arm_pos() 的 quat
+            euler_rad = np.radians(euler)
+            quat_from_euler = quat_from_euler_xyz(euler_rad[0], euler_rad[1], euler_rad[2])
+            quat_from_euler = normalize_quat(quat_from_euler)
+            if quat_from_euler[0] < 0:
+                quat_from_euler = -quat_from_euler
+            # print(f"quat(from get_arm_pos):   {quat}")
+            # print(f"quat(from euler转换):     {quat_from_euler.tolist()}")
+            # print(f"  quat差异: {[round(a-b,5) for a,b in zip(quat, quat_from_euler.tolist())]}")
+
+            # 5. 对比 get_arm_pos() + euler_from_quat() 与 get_arm_pos_euler() 的 euler
+            euler_back = euler_from_quat(quat)
+            euler_back_deg = [np.degrees(e) for e in euler_back]
+            # print(f"euler(from get_arm_pos_euler): {euler}")
+            # print(f"euler(from quat转换):          {euler_back_deg}")
+            # print(f"  euler差异: {[round(a-b,4) for a,b in zip(euler, euler_back_deg)]}")
+
+            # 6. 用 get_arm_pos() 的结果做 IK 求解验证
+            # print("--- IK 验证 ---")
+            piper.set_arm_pos(pos, quat, gripper_open_m=ang[6])
+            pos_after, quat_after = piper.get_arm_pos()
+            # print(f"IK后 pos={pos_after}, quat={quat_after}")
+            # print(f"  IK pos误差: {[round(a-b,5) for a,b in zip(pos, pos_after)]}")
+            # print(f"  IK quat误差: {[round(a-b,5) for a,b in zip(quat, quat_after)]}")
+
+            # 
+            # IK 求逆
+            ik_result = piper.isaac_ik_trace(pos, quat, steps=1)
+            
+            # 将 ik 的末端位姿 传给 set_arm_angles
+            piper.set_arm_angles(angles_rad=ik_result[-1], gripper_open_m=0.070)
+
+            # 到位后保持 2 秒观察
+            for _ in range(240):
+                scene.write_data_to_sim()
+                sim.step()
+                scene.update(sim.cfg.dt)
+        break
+    
+
 
 if __name__ == "__main__":
     test_ik()

@@ -10,3 +10,6 @@
 [submodule "ref/Agilex-College"]
 	path = ref/Agilex-College
 	url = https://github.com/agilexrobotics/Agilex-College.git
+[submodule "ref/piper_sdk"]
+	path = ref/piper_sdk
+	url = https://github.com/agilexrobotics/piper_sdk.git
