@@ -12,6 +12,8 @@ temp/*
 datasets/*
 # assets/*
 __pycache__/
+.vscode/
+.claude/
 
 prompt.md
 test.py

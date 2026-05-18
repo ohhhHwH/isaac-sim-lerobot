@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(/home/hyl/miniconda3/envs/physx-anything/bin/python -c ' *)",
-      "Bash(pip3 install *)",
-      "Bash(python3 -c ' *)"
-    ]
-  }
-}
