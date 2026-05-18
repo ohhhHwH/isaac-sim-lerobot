@@ -641,7 +641,7 @@ class SimIsaacModel:
 
         # 初始化仿真
         sim_cfg = sim_utils.SimulationCfg(
-            dt=1.0 / 100.0,  # 200Hz：1cm薄物体需要更高频率防穿透
+            dt=1.0 / 400.0,  # 200Hz：1cm薄物体需要更高频率防穿透
             device=(
                 args_cli.device
                 if hasattr(args_cli, "device") and args_cli.device
