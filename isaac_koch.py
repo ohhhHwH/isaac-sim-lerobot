@@ -69,7 +69,7 @@ OBJ_SIZE_RANGE = (0.02, 0.04)  # cube side length
 
 OBJ_L = 0.02
 OBJ_W = 0.08
-OBJ_H = 0.04
+OBJ_H = 0.03
 
 OBJ_Z = OBJ_H / 2  # half cube size, sitting on ground
 
@@ -101,21 +101,23 @@ STEPS_PER_PHASE = 60
 # Camera resolution
 CAM_WIDTH = 640
 CAM_HEIGHT = 480
-CAM_POS = (0.0, 0.2, 0.0)
-CAM_ROT = (
-    0.766,
-    -0.643,
-    0,
-    0,
-)  # 四元数 (w, x, y, z)，测试为正好看到夹爪 (x:-80,y:0,z:0)
+# CAM_POS = (0.0, 0.2, 0.0)
+# CAM_ROT = (
+#     0.766,
+#     -0.643,
+#     0,
+#     0,
+# )  # 四元数 (w, x, y, z)，测试为正好看到夹爪 (x:-80,y:0,z:0)
 
 
 # Place target
 PLACE_POS = (0.05, 0.15, 0.05)
 
 
-# Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
-def look_at_quat(eye: tuple[float, float, float], target: tuple[float, float, float]):
+# 相机视角的四元数，从哪看到哪
+def look_at_quat(
+    eye: tuple[float, float, float], target: tuple[float, float, float], reverse=False
+):
     """Compute a world-frame camera quaternion (w, x, y, z) looking at target."""
     ex, ey, ez = eye
     tx, ty, tz = target
@@ -125,7 +127,7 @@ def look_at_quat(eye: tuple[float, float, float], target: tuple[float, float, fl
         return (1.0, 0.0, 0.0, 0.0)
     fx, fy, fz = fx / flen, fy / flen, fz / flen
 
-    up_world = (0.0, 0.0, 1.0)
+    up_world = (0.0, 0.0, 1.0) if not reverse else (0.0, 0.0, -1.0)
     rx = fy * up_world[2] - fz * up_world[1]
     ry = fz * up_world[0] - fx * up_world[2]
     rz = fx * up_world[1] - fy * up_world[0]
@@ -174,6 +176,7 @@ def look_at_quat(eye: tuple[float, float, float], target: tuple[float, float, fl
     return (w, x, y, z)
 
 
+# Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
 _JOINT_CHAIN = [
     ((0.0, 0.0, 0.039), "z", 1),  # joint1: base yaw
     ((-0.0002, 0.0, 0.0173), "x", -1),  # joint2: shoulder pitch
@@ -456,8 +459,8 @@ class SimIsaacModel:
                     clipping_range=(0.01, 1.0e5),
                 ),
                 offset=CameraCfg.OffsetCfg(
-                    pos=(0.0, -0.1, 1.3),
-                    rot=look_at_quat((0.0, -0.1, 1.3), (0.0, 0.0, 0.1)),
+                    pos=(0.0, -0.1, 1.0),
+                    rot=look_at_quat((0.0, -0.1, 1.0), (0.0, 0.0, 0.0)),
                     convention="opengl",
                 ),
             )
@@ -516,10 +519,16 @@ class SimIsaacModel:
                 ),
                 # 相机相对父体的位姿偏移
                 offset=CameraCfg.OffsetCfg(
-                    pos=CAM_POS,  # 平移偏移（x, y, z），单位为场景距离（通常米）
+                    pos=(
+                        0.0,
+                        0.12,
+                        0.0,
+                    ),  # 平移偏移（x, y, z），单位为场景距离（通常米）
                     # 旋转偏移：四元数 (w, x, y, z)
                     # 注意：四元数方向和符号需要与场景其他部分一致（此处来源于 MuJoCo->Isaac 的映射）
-                    rot=CAM_ROT,  # 测试为正好看到夹爪 (x:-80,y:0,z:0)
+                    rot=look_at_quat(
+                        (0.0, 0.12, 0.0), (0.0, 0.0, -0.05), reverse=True
+                    ),  # 测试为正好看到夹爪 (x:-67,y:0,z:0)
                     convention="opengl",  # 偏移的解释约定，例如 "world" 表示以世界/绝对参照解释，
                 ),
             )

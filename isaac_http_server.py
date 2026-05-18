@@ -239,7 +239,7 @@ def set_state():
                     jsonify(
                         {
                             "ok": False,
-                            "error": "gripper_open_0to1 must be float in [0, 1]",
+                            "error": f"gripper_open_0to1 must be float in [0, 1], now {gripper_0to1}",
                         }
                     ),
                     400,
