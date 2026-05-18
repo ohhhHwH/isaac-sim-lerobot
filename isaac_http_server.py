@@ -56,6 +56,7 @@ torque_enabled = True
 # Stored as list of 6 floats (radians): [joint1..joint5, gripper]
 pending_command = None
 command_lock = threading.Lock()
+last_sim_t = None
 
 
 def gripper_angle_to_0to1(angle: float) -> float:
@@ -80,6 +81,15 @@ def gripper_0to1_to_angle(value: float) -> float:
         float: Gripper angle in sim definition
     """
     return GRIPPER_CLOSED + value * (GRIPPER_OPEN - GRIPPER_CLOSED)
+
+
+def print_sim_time():
+    global last_sim_t
+    sim_t = sim._sim.current_time  # 当前仿真时间 (s)
+    sim_t = f"{sim_t:.2f}"
+    if last_sim_t != sim_t:
+        last_sim_t = sim_t
+        print(f"Current simulation time: {sim_t}s, real time: {time.time()}s")
 
 
 def _require_sim():
@@ -425,6 +435,7 @@ def main():
     # Run simulation loop in main thread
     try:
         while not shutdown_flag.is_set() and simulation_app.is_running():
+            print_sim_time()
             # Consume pending command from HTTP handlers
             cmd = None
             with command_lock:

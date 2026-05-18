@@ -47,7 +47,7 @@ from isaaclab.assets import SurfaceGripper, SurfaceGripperCfg
 import h5py
 import random
 
-DEBUG_MODE = True  # 调试模式
+DEBUG_MODE = False  # 调试模式
 # 启用后方块位置固定
 
 # --- 常量配置 ---
@@ -357,7 +357,7 @@ class SimIsaacModel:
         )
         # 质量属性配置
         self._obj_mass_props = sim_utils.MassPropertiesCfg(
-            mass=0.02,  # 质量 0.02kg，适当的质量提高稳定性
+            mass=0.001,  # 质量 0.02kg，适当的质量提高稳定性
             # density=500.0,            # 密度 500kg/m³
         )
         # 碰撞属性配置 - 关键参数用于提高抓取成功率
@@ -463,43 +463,43 @@ class SimIsaacModel:
                 ),
             )
 
-            side = CameraCfg(
-                prim_path="{ENV_REGEX_NS}/CameraSide",
-                update_period=0.1,
-                height=CAM_HEIGHT,
-                width=CAM_WIDTH,
-                data_types=["rgb"],
-                spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.0,
-                    focus_distance=400.0,
-                    horizontal_aperture=20.955,
-                    clipping_range=(0.01, 1.0e5),
-                ),
-                offset=CameraCfg.OffsetCfg(
-                    pos=(1.15, 0.0, 0.2),
-                    rot=look_at_quat((1.15, 0.0, 0.2), (0.0, 0.0, 0.12)),
-                    convention="opengl",
-                ),
-            )
+            # side = CameraCfg(
+            #     prim_path="{ENV_REGEX_NS}/CameraSide",
+            #     update_period=0.1,
+            #     height=CAM_HEIGHT,
+            #     width=CAM_WIDTH,
+            #     data_types=["rgb"],
+            #     spawn=sim_utils.PinholeCameraCfg(
+            #         focal_length=24.0,
+            #         focus_distance=400.0,
+            #         horizontal_aperture=20.955,
+            #         clipping_range=(0.01, 1.0e5),
+            #     ),
+            #     offset=CameraCfg.OffsetCfg(
+            #         pos=(1.15, 0.0, 0.2),
+            #         rot=look_at_quat((1.15, 0.0, 0.2), (0.0, 0.0, 0.12)),
+            #         convention="opengl",
+            #     ),
+            # )
 
-            front = CameraCfg(
-                prim_path="{ENV_REGEX_NS}/CameraFront",
-                update_period=0.1,
-                height=CAM_HEIGHT,
-                width=CAM_WIDTH,
-                data_types=["rgb"],
-                spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.0,
-                    focus_distance=400.0,
-                    horizontal_aperture=20.955,
-                    clipping_range=(0.01, 1.0e5),
-                ),
-                offset=CameraCfg.OffsetCfg(
-                    pos=(0.0, 1.35, 0.25),
-                    rot=look_at_quat((0.0, 1.35, 0.25), (0.0, 0.0, 0.12)),
-                    convention="opengl",
-                ),
-            )
+            # front = CameraCfg(
+            #     prim_path="{ENV_REGEX_NS}/CameraFront",
+            #     update_period=0.1,
+            #     height=CAM_HEIGHT,
+            #     width=CAM_WIDTH,
+            #     data_types=["rgb"],
+            #     spawn=sim_utils.PinholeCameraCfg(
+            #         focal_length=24.0,
+            #         focus_distance=400.0,
+            #         horizontal_aperture=20.955,
+            #         clipping_range=(0.01, 1.0e5),
+            #     ),
+            #     offset=CameraCfg.OffsetCfg(
+            #         pos=(0.0, 1.35, 0.25),
+            #         rot=look_at_quat((0.0, 1.35, 0.25), (0.0, 0.0, 0.12)),
+            #         convention="opengl",
+            #     ),
+            # )
 
             gripper_cam = CameraCfg(
                 # 相机在 USD stage 中的 prim 路径（挂在 gripper_static_1 下）
@@ -641,7 +641,7 @@ class SimIsaacModel:
 
         # 初始化仿真
         sim_cfg = sim_utils.SimulationCfg(
-            dt=1.0 / 400.0,  # 200Hz：1cm薄物体需要更高频率防穿透
+            dt=1.0 / 200.0,  # 200Hz：1cm薄物体需要更高频率防穿透
             device=(
                 args_cli.device
                 if hasattr(args_cli, "device") and args_cli.device
@@ -728,31 +728,31 @@ class SimIsaacModel:
         self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0] - 1
 
         # 添加默认视角（机械臂在原点，高约 0.3m，中心约 0.12m）
-        self.add_view(
-            "top",
-            {
-                "eye": [0.0, -0.1, 1.3],
-                "target": [0.0, 0.0, 0.1],
-                "focal_length": 18.0,
-            },
-        )
-        self.add_view(
-            "side",
-            {
-                "eye": [1.15, 0.0, 0.2],
-                "target": [0.0, 0.0, 0.12],
-            },
-        )
-        self.add_view(
-            "front",
-            {
-                "eye": [0.0, 1.35, 0.25],
-                "target": [0.0, 0.0, 0.12],
-            },
-        )
-        self.add_sensor_view(
-            "gripper_cam", "/World/envs/env_0/Koch/gripper_static_1/gripper_cam"
-        )
+        # self.add_view(
+        #     "top",
+        #     {
+        #         "eye": [0.0, -0.1, 1.3],
+        #         "target": [0.0, 0.0, 0.1],
+        #         "focal_length": 18.0,
+        #     },
+        # )
+        # self.add_view(
+        #     "side",
+        #     {
+        #         "eye": [1.15, 0.0, 0.2],
+        #         "target": [0.0, 0.0, 0.12],
+        #     },
+        # )
+        # self.add_view(
+        #     "front",
+        #     {
+        #         "eye": [0.0, 1.35, 0.25],
+        #         "target": [0.0, 0.0, 0.12],
+        #     },
+        # )
+        # self.add_sensor_view(
+        #     "gripper_cam", "/World/envs/env_0/Koch/gripper_static_1/gripper_cam"
+        # )
         # self.add_viewport("top")  # 启动时默认显示 top 视角的 viewport TODO 仍有问题，仍需手动添加
 
         print("[INFO]: SimIsaacModel setup complete.")
