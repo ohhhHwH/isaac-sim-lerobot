@@ -8,6 +8,9 @@ import sys
 import threading
 import time
 import math
+import base64
+import cv2
+import numpy as np
 import torch
 from flask import Flask, request, jsonify
 
@@ -77,6 +80,70 @@ def gripper_0to1_to_angle(value: float) -> float:
         float: Gripper angle in sim definition
     """
     return GRIPPER_CLOSED + value * (GRIPPER_OPEN - GRIPPER_CLOSED)
+
+
+def _require_sim():
+    if sim is None:
+        return jsonify({"ok": False, "error": "Simulation not initialized"}), 503
+    return None
+
+
+def _set_cube_pose(position: list[float], rotation_rad: float = 0.0) -> dict:
+    """Place the built-in cube at a requested pose and clear residual velocity."""
+    if "cube" not in sim._scene.keys():
+        raise RuntimeError("Scene does not contain cube object")
+
+    if len(position) != 3:
+        raise ValueError("position must be a list of 3 floats")
+
+    x, y, z = [float(value) for value in position]
+    yaw = float(rotation_rad)
+    qw = math.cos(yaw / 2)
+    qx, qy = 0.0, 0.0
+    qz = math.sin(yaw / 2)
+
+    cube = sim._scene["cube"]
+    pose = torch.tensor(
+        [[x, y, z, qw, qx, qy, qz]], dtype=torch.float32, device=cube.device
+    )
+    pose[:, :3] += sim._scene.env_origins
+    cube.write_root_pose_to_sim(pose)
+    cube.write_root_velocity_to_sim(
+        torch.zeros((1, 6), dtype=torch.float32, device=cube.device)
+    )
+
+    return {
+        "name": "cube",
+        "position": [x, y, z],
+        "orientation": [qw, qx, qy, qz],
+        "rotation_rad": yaw,
+    }
+
+
+def _get_cube_position() -> list[float]:
+    if "cube" not in sim._scene.keys():
+        raise RuntimeError("Scene does not contain cube object")
+    cube = sim._scene["cube"]
+    return cube.data.root_pos_w[0].detach().cpu().numpy().astype(float).tolist()
+
+
+def _get_camera_rgb(camera_name: str = "gripper_cam") -> np.ndarray:
+    camera = sim._scene[camera_name]
+    rgb = camera.data.output["rgb"][0, ..., :3].detach().cpu().numpy()
+    return np.asarray(rgb, dtype=np.uint8)
+
+
+def _normalize_camera_name(camera_name: str) -> str:
+    aliases = {"gripper": "gripper_cam"}
+    return aliases.get(camera_name, camera_name)
+
+
+def _available_camera_names() -> list[str]:
+    return [
+        name
+        for name in ("gripper_cam", "top", "side", "front")
+        if name in sim._scene.keys()
+    ]
 
 
 def flask_server():
@@ -208,6 +275,116 @@ def set_torque():
         print(f"[Server] Torque {'enabled' if enabled else 'disabled'}")
 
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/object", methods=["POST"])
+def spawn_object():
+    """Spawn/reset the simulated target object.
+
+    The current Isaac scene already owns a single dynamic cube, so this endpoint
+    repositions that cube instead of creating a new USD prim per episode.
+    """
+    try:
+        unavailable = _require_sim()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "No JSON data provided"}), 400
+
+        object_type = data.get("type", "block")
+        if object_type not in ("block", "cube"):
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "Only object type 'block'/'cube' is supported",
+                    }
+                ),
+                400,
+            )
+
+        position = data.get("position")
+        if (
+            not isinstance(position, list)
+            or len(position) != 3
+            or not all(isinstance(value, (int, float)) for value in position)
+        ):
+            return (
+                jsonify({"ok": False, "error": "position must be a list of 3 floats"}),
+                400,
+            )
+
+        rotation_rad = data.get("rotation_rad", 0.0)
+        if not isinstance(rotation_rad, (int, float)):
+            return jsonify({"ok": False, "error": "rotation_rad must be a float"}), 400
+
+        with state_lock:
+            result = _set_cube_pose(position, rotation_rad)
+
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/object/pose", methods=["GET"])
+def get_object_pose():
+    """Get the simulated object's current world position."""
+    try:
+        unavailable = _require_sim()
+        if unavailable:
+            return unavailable
+
+        with state_lock:
+            position = _get_cube_position()
+
+        return jsonify({"ok": True, "position": position, "object_position": position})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/camera/rgb", methods=["GET"])
+def get_camera_rgb():
+    """Get a camera RGB frame as a base64-encoded PNG."""
+    try:
+        unavailable = _require_sim()
+        if unavailable:
+            return unavailable
+
+        requested_camera = request.args.get("camera", "gripper_cam")
+        camera_name = _normalize_camera_name(requested_camera)
+        with state_lock:
+            if camera_name not in sim._scene.keys():
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": f"Unknown camera '{requested_camera}'",
+                            "available": _available_camera_names(),
+                        }
+                    ),
+                    400,
+                )
+            rgb = _get_camera_rgb(camera_name)
+
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        ok, encoded = cv2.imencode(".png", bgr)
+        if not ok:
+            raise RuntimeError("Failed to encode RGB image")
+
+        return jsonify(
+            {
+                "ok": True,
+                "image": base64.b64encode(encoded.tobytes()).decode("ascii"),
+                "encoding": "png_base64",
+                "camera": camera_name,
+                "requested_camera": requested_camera,
+                "shape": list(rgb.shape),
+            }
+        )
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

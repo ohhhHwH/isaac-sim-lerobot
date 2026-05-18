@@ -115,6 +115,65 @@ PLACE_POS = (0.05, 0.15, 0.05)
 
 
 # Koch arm FK 链 (translation_xyz, rotation_axis, axis_sign)
+def look_at_quat(eye: tuple[float, float, float], target: tuple[float, float, float]):
+    """Compute a world-frame camera quaternion (w, x, y, z) looking at target."""
+    ex, ey, ez = eye
+    tx, ty, tz = target
+    fx, fy, fz = tx - ex, ty - ey, tz - ez
+    flen = math.sqrt(fx * fx + fy * fy + fz * fz)
+    if flen < 1e-8:
+        return (1.0, 0.0, 0.0, 0.0)
+    fx, fy, fz = fx / flen, fy / flen, fz / flen
+
+    up_world = (0.0, 0.0, 1.0)
+    rx = fy * up_world[2] - fz * up_world[1]
+    ry = fz * up_world[0] - fx * up_world[2]
+    rz = fx * up_world[1] - fy * up_world[0]
+    rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if rlen < 1e-8:
+        up_world = (0.0, 1.0, 0.0)
+        rx = fy * up_world[2] - fz * up_world[1]
+        ry = fz * up_world[0] - fx * up_world[2]
+        rz = fx * up_world[1] - fy * up_world[0]
+        rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+    rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
+
+    ux = ry * fz - rz * fy
+    uy = rz * fx - rx * fz
+    uz = rx * fy - ry * fx
+
+    m00, m01, m02 = rx, ux, -fx
+    m10, m11, m12 = ry, uy, -fy
+    m20, m21, m22 = rz, uz, -fz
+
+    trace = m00 + m11 + m22
+    if trace > 0:
+        s = 0.5 / math.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (m21 - m12) * s
+        y = (m02 - m20) * s
+        z = (m10 - m01) * s
+    elif m00 > m11 and m00 > m22:
+        s = 2.0 * math.sqrt(1.0 + m00 - m11 - m22)
+        w = (m21 - m12) / s
+        x = 0.25 * s
+        y = (m01 + m10) / s
+        z = (m02 + m20) / s
+    elif m11 > m22:
+        s = 2.0 * math.sqrt(1.0 + m11 - m00 - m22)
+        w = (m02 - m20) / s
+        x = (m01 + m10) / s
+        y = 0.25 * s
+        z = (m12 + m21) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + m22 - m00 - m11)
+        w = (m10 - m01) / s
+        x = (m02 + m20) / s
+        y = (m12 + m21) / s
+        z = 0.25 * s
+    return (w, x, y, z)
+
+
 _JOINT_CHAIN = [
     ((0.0, 0.0, 0.039), "z", 1),  # joint1: base yaw
     ((-0.0002, 0.0, 0.0173), "x", -1),  # joint2: shoulder pitch
@@ -384,6 +443,63 @@ class SimIsaacModel:
             # 其中 xyaxes 对应旋转矩阵列向量:
             # x=(1,0,0), y=(0,0.8,-0.6), z=x×y=(0,0.6,0.8)
             # 等价为绕 x 轴旋转约 -36.87°，四元数 [w,x,y,z] ≈ [0.948683, -0.316228, 0, 0]
+            top = CameraCfg(
+                prim_path="{ENV_REGEX_NS}/CameraTop",
+                update_period=0.1,
+                height=CAM_HEIGHT,
+                width=CAM_WIDTH,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=18.0,
+                    focus_distance=400.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.01, 1.0e5),
+                ),
+                offset=CameraCfg.OffsetCfg(
+                    pos=(0.0, -0.1, 1.3),
+                    rot=look_at_quat((0.0, -0.1, 1.3), (0.0, 0.0, 0.1)),
+                    convention="opengl",
+                ),
+            )
+
+            side = CameraCfg(
+                prim_path="{ENV_REGEX_NS}/CameraSide",
+                update_period=0.1,
+                height=CAM_HEIGHT,
+                width=CAM_WIDTH,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=24.0,
+                    focus_distance=400.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.01, 1.0e5),
+                ),
+                offset=CameraCfg.OffsetCfg(
+                    pos=(1.15, 0.0, 0.2),
+                    rot=look_at_quat((1.15, 0.0, 0.2), (0.0, 0.0, 0.12)),
+                    convention="opengl",
+                ),
+            )
+
+            front = CameraCfg(
+                prim_path="{ENV_REGEX_NS}/CameraFront",
+                update_period=0.1,
+                height=CAM_HEIGHT,
+                width=CAM_WIDTH,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=24.0,
+                    focus_distance=400.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.01, 1.0e5),
+                ),
+                offset=CameraCfg.OffsetCfg(
+                    pos=(0.0, 1.35, 0.25),
+                    rot=look_at_quat((0.0, 1.35, 0.25), (0.0, 0.0, 0.12)),
+                    convention="opengl",
+                ),
+            )
+
             gripper_cam = CameraCfg(
                 # 相机在 USD stage 中的 prim 路径（挂在 gripper_static_1 下）
                 prim_path="{ENV_REGEX_NS}/Koch/gripper_static_1/gripper_cam",

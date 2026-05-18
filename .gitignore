@@ -6,10 +6,12 @@
 *.yaml
 *.pid
 *.log
+*.png
 
 temp/*
 datasets/*
 # assets/*
+__pycache__/
 
 prompt.md
 test.py
