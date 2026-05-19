@@ -457,8 +457,8 @@ class SimIsaacModel:
                     clipping_range=(0.01, 1.0e5),
                 ),
                 offset=CameraCfg.OffsetCfg(
-                    pos=(0.0, -0.1, 1.0),
-                    rot=look_at_quat((0.0, -0.1, 1.0), (0.0, 0.0, 0.0)),
+                    pos=(0.0, -0.1, 0.5),
+                    rot=look_at_quat((0.0, -0.1, 0.5), (0.0, 0.0, 0.0)),
                     convention="opengl",
                 ),
             )
@@ -534,108 +534,108 @@ class SimIsaacModel:
             # --- 夹爪上（两个连杆）被 Cube 施加的力：分别在活动抓手和静态爪体上放传感器 ---
             # 说明：prim_path 指定传感器挂载的 prim（必须唯一对应该环境内的一个 body），
             # filter_prim_paths_expr 用于只报告与哪些 prim 的接触（这里只跟 Cube 的接触会被上报）
-            gripper_move_contact_cfg = ContactSensorCfg(
-                prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",  # 传感器挂在活动爪体（moving）
-                filter_prim_paths_expr=[
-                    "{ENV_REGEX_NS}/Cube"
-                ],  # 只跟 Cube 的接触被记录
-                track_pose=True,  # 是否记录传感器原点位姿（world frame）
-                track_contact_points=True,  # 是否记录每个接触点的位置（用于可视化/定位力箭头）
-                track_friction_forces=True,  # 是否记录摩擦（切向）分力
-                track_air_time=True,  # 是否追踪“空中/接触”时间（需要 force_threshold）
-                force_threshold=0.5,  # 小于此合力范数被认为“无接触”（用于 track_air_time）
-                debug_vis=True,  # 在场景中画力箭头/接触点，便于调试验证
-                update_period=0.0,  # 0.0 表示每个仿真步都更新
-                history_length=6,  # 保存的历史帧数（用于平滑/历史查询）
-                max_contact_data_count_per_prim=32,  # 每个 prim 最多保存多少个接触记录（避免数据溢出）
-                visualizer_cfg=VisualizationMarkersCfg(
-                    prim_path="/Visuals/ContactSensorGripperMove",
-                    markers={
-                        "contact": sim_utils.SphereCfg(
-                            radius=0.012,
-                            visual_material=sim_utils.PreviewSurfaceCfg(
-                                diffuse_color=(1.0, 0.4, 0.0)
-                            ),
-                        ),
-                        "no_contact": sim_utils.SphereCfg(
-                            radius=0.012,
-                            visual_material=sim_utils.PreviewSurfaceCfg(
-                                diffuse_color=(1.0, 0.8, 0.3)
-                            ),
-                            visible=False,
-                        ),
-                    },
-                ),
-            )
+            # gripper_move_contact_cfg = ContactSensorCfg(
+            #     prim_path="{ENV_REGEX_NS}/Koch/gripper_moving_1",  # 传感器挂在活动爪体（moving）
+            #     filter_prim_paths_expr=[
+            #         "{ENV_REGEX_NS}/Cube"
+            #     ],  # 只跟 Cube 的接触被记录
+            #     track_pose=True,  # 是否记录传感器原点位姿（world frame）
+            #     track_contact_points=True,  # 是否记录每个接触点的位置（用于可视化/定位力箭头）
+            #     track_friction_forces=True,  # 是否记录摩擦（切向）分力
+            #     track_air_time=True,  # 是否追踪“空中/接触”时间（需要 force_threshold）
+            #     force_threshold=0.5,  # 小于此合力范数被认为“无接触”（用于 track_air_time）
+            #     debug_vis=True,  # 在场景中画力箭头/接触点，便于调试验证
+            #     update_period=0.0,  # 0.0 表示每个仿真步都更新
+            #     history_length=6,  # 保存的历史帧数（用于平滑/历史查询）
+            #     max_contact_data_count_per_prim=32,  # 每个 prim 最多保存多少个接触记录（避免数据溢出）
+            #     visualizer_cfg=VisualizationMarkersCfg(
+            #         prim_path="/Visuals/ContactSensorGripperMove",
+            #         markers={
+            #             "contact": sim_utils.SphereCfg(
+            #                 radius=0.012,
+            #                 visual_material=sim_utils.PreviewSurfaceCfg(
+            #                     diffuse_color=(1.0, 0.4, 0.0)
+            #                 ),
+            #             ),
+            #             "no_contact": sim_utils.SphereCfg(
+            #                 radius=0.012,
+            #                 visual_material=sim_utils.PreviewSurfaceCfg(
+            #                     diffuse_color=(1.0, 0.8, 0.3)
+            #                 ),
+            #                 visible=False,
+            #             ),
+            #         },
+            #     ),
+            # )
 
-            gripper_static_contact_cfg = ContactSensorCfg(
-                prim_path="{ENV_REGEX_NS}/Koch/gripper_static_1",  # 传感器挂在静态爪体（static）
-                filter_prim_paths_expr=["{ENV_REGEX_NS}/Cube"],
-                track_pose=True,
-                track_contact_points=True,
-                track_friction_forces=True,
-                track_air_time=True,
-                force_threshold=0.5,
-                debug_vis=True,
-                update_period=0.0,
-                history_length=6,
-                max_contact_data_count_per_prim=32,
-                visualizer_cfg=VisualizationMarkersCfg(
-                    prim_path="/Visuals/ContactSensorGripperStatic",
-                    markers={
-                        "contact": sim_utils.SphereCfg(
-                            radius=0.010,
-                            visual_material=sim_utils.PreviewSurfaceCfg(
-                                diffuse_color=(0.1, 0.6, 1.0)
-                            ),
-                        ),
-                        "no_contact": sim_utils.SphereCfg(
-                            radius=0.010,
-                            visual_material=sim_utils.PreviewSurfaceCfg(
-                                diffuse_color=(0.5, 0.8, 1.0)
-                            ),
-                            visible=False,
-                        ),
-                    },
-                ),
-            )
+            # gripper_static_contact_cfg = ContactSensorCfg(
+            #     prim_path="{ENV_REGEX_NS}/Koch/gripper_static_1",  # 传感器挂在静态爪体（static）
+            #     filter_prim_paths_expr=["{ENV_REGEX_NS}/Cube"],
+            #     track_pose=True,
+            #     track_contact_points=True,
+            #     track_friction_forces=True,
+            #     track_air_time=True,
+            #     force_threshold=0.5,
+            #     debug_vis=True,
+            #     update_period=0.0,
+            #     history_length=6,
+            #     max_contact_data_count_per_prim=32,
+            #     visualizer_cfg=VisualizationMarkersCfg(
+            #         prim_path="/Visuals/ContactSensorGripperStatic",
+            #         markers={
+            #             "contact": sim_utils.SphereCfg(
+            #                 radius=0.010,
+            #                 visual_material=sim_utils.PreviewSurfaceCfg(
+            #                     diffuse_color=(0.1, 0.6, 1.0)
+            #                 ),
+            #             ),
+            #             "no_contact": sim_utils.SphereCfg(
+            #                 radius=0.010,
+            #                 visual_material=sim_utils.PreviewSurfaceCfg(
+            #                     diffuse_color=(0.5, 0.8, 1.0)
+            #                 ),
+            #                 visible=False,
+            #             ),
+            #         },
+            #     ),
+            # )
 
             # --- 在 Cube 上放一个传感器，用来观测 Cube 受到夹爪施加的力（便于从被施力对象角度分析） ---
             # 说明：把传感器放在 Cube 上可以直接读取 Cube 受到的合力、接触点和摩擦力（同一 contact 以不同侧上报）
-            cube_contact_forces = ContactSensorCfg(
-                prim_path="{ENV_REGEX_NS}/Cube",  # 将传感器放在被抓取物体上（必须精确对应场景中的 Cube prim）
-                filter_prim_paths_expr=[
-                    "{ENV_REGEX_NS}/Koch/gripper_moving_1",
-                    "{ENV_REGEX_NS}/Koch/gripper_static_1",
-                ],  # 只关注来自夹爪两个 body 的接触
-                track_pose=False,  # 通常物体本身位姿通过 object.data.root_pos_w 可得，传感器不必重复记录
-                track_contact_points=True,  # 记录所有接触点位置（用于定位受力位置）
-                track_friction_forces=True,  # 记录摩擦力分量
-                track_air_time=False,  # 对物体通常不需要追踪 air/contact 时间，可按需打开
-                force_threshold=0.5,
-                debug_vis=True,  # 在世界中绘制受力箭头（来自 contact_pos_w 和力向量）
-                update_period=0.0,
-                history_length=6,
-                max_contact_data_count_per_prim=32,
-                visualizer_cfg=VisualizationMarkersCfg(
-                    prim_path="/Visuals/ContactSensorCube",
-                    markers={
-                        "contact": sim_utils.SphereCfg(
-                            radius=0.008,
-                            visual_material=sim_utils.PreviewSurfaceCfg(
-                                diffuse_color=(0.7, 0.2, 1.0)
-                            ),
-                        ),
-                        "no_contact": sim_utils.SphereCfg(
-                            radius=0.008,
-                            visual_material=sim_utils.PreviewSurfaceCfg(
-                                diffuse_color=(0.85, 0.6, 1.0)
-                            ),
-                            visible=False,
-                        ),
-                    },
-                ),
-            )
+            # cube_contact_forces = ContactSensorCfg(
+            #     prim_path="{ENV_REGEX_NS}/Cube",  # 将传感器放在被抓取物体上（必须精确对应场景中的 Cube prim）
+            #     filter_prim_paths_expr=[
+            #         "{ENV_REGEX_NS}/Koch/gripper_moving_1",
+            #         "{ENV_REGEX_NS}/Koch/gripper_static_1",
+            #     ],  # 只关注来自夹爪两个 body 的接触
+            #     track_pose=False,  # 通常物体本身位姿通过 object.data.root_pos_w 可得，传感器不必重复记录
+            #     track_contact_points=True,  # 记录所有接触点位置（用于定位受力位置）
+            #     track_friction_forces=True,  # 记录摩擦力分量
+            #     track_air_time=False,  # 对物体通常不需要追踪 air/contact 时间，可按需打开
+            #     force_threshold=0.5,
+            #     debug_vis=True,  # 在世界中绘制受力箭头（来自 contact_pos_w 和力向量）
+            #     update_period=0.0,
+            #     history_length=6,
+            #     max_contact_data_count_per_prim=32,
+            #     visualizer_cfg=VisualizationMarkersCfg(
+            #         prim_path="/Visuals/ContactSensorCube",
+            #         markers={
+            #             "contact": sim_utils.SphereCfg(
+            #                 radius=0.008,
+            #                 visual_material=sim_utils.PreviewSurfaceCfg(
+            #                     diffuse_color=(0.7, 0.2, 1.0)
+            #                 ),
+            #             ),
+            #             "no_contact": sim_utils.SphereCfg(
+            #                 radius=0.008,
+            #                 visual_material=sim_utils.PreviewSurfaceCfg(
+            #                     diffuse_color=(0.85, 0.6, 1.0)
+            #                 ),
+            #                 visible=False,
+            #             ),
+            #         },
+            #     ),
+            # )
 
         self._scene_cfg_class = _SceneCfg
 
