@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import carb
 import os
+import math
 
 # isaacsim 依赖库
 import omni
@@ -73,6 +74,73 @@ GRIPPER_JOINT_NAMES = ["joint7", "joint8"]
 
 ANGLE_STEP = 0.05
 PIPER_NAME = "piper"
+
+# 相机参数
+CAM_HEIGHT = 480
+CAM_WIDTH = 640
+
+# 相机视角的四元数，从哪看到哪
+def look_at_quat(
+    eye: tuple[float, float, float], target: tuple[float, float, float], reverse=False
+):
+    """Compute a world-frame camera quaternion (w, x, y, z) looking at target."""
+    ex, ey, ez = eye
+    tx, ty, tz = target
+    fx, fy, fz = tx - ex, ty - ey, tz - ez
+    flen = math.sqrt(fx * fx + fy * fy + fz * fz)
+    if flen < 1e-8:
+        return (1.0, 0.0, 0.0, 0.0)
+    fx, fy, fz = fx / flen, fy / flen, fz / flen
+
+    up_world = (0.0, 0.0, 1.0) if not reverse else (0.0, 0.0, -1.0)
+    rx = fy * up_world[2] - fz * up_world[1]
+    ry = fz * up_world[0] - fx * up_world[2]
+    rz = fx * up_world[1] - fy * up_world[0]
+    rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if rlen < 1e-8:
+        up_world = (0.0, 1.0, 0.0)
+        rx = fy * up_world[2] - fz * up_world[1]
+        ry = fz * up_world[0] - fx * up_world[2]
+        rz = fx * up_world[1] - fy * up_world[0]
+        rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+    rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
+
+    ux = ry * fz - rz * fy
+    uy = rz * fx - rx * fz
+    uz = rx * fy - ry * fx
+
+    m00, m01, m02 = rx, ux, -fx
+    m10, m11, m12 = ry, uy, -fy
+    m20, m21, m22 = rz, uz, -fz
+
+    trace = m00 + m11 + m22
+    if trace > 0:
+        s = 0.5 / math.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (m21 - m12) * s
+        y = (m02 - m20) * s
+        z = (m10 - m01) * s
+    elif m00 > m11 and m00 > m22:
+        s = 2.0 * math.sqrt(1.0 + m00 - m11 - m22)
+        w = (m21 - m12) / s
+        x = 0.25 * s
+        y = (m01 + m10) / s
+        z = (m02 + m20) / s
+    elif m11 > m22:
+        s = 2.0 * math.sqrt(1.0 + m11 - m00 - m22)
+        w = (m02 - m20) / s
+        x = (m01 + m10) / s
+        y = 0.25 * s
+        z = (m12 + m21) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + m22 - m00 - m11)
+        w = (m10 - m01) / s
+        x = (m02 + m20) / s
+        y = (m12 + m21) / s
+        z = 0.25 * s
+    return (w, x, y, z)
+
+
 
 class KeyboardController:
     def __init__(self):
@@ -139,6 +207,7 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             ),
         },
     )
+    
     orange = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Orange",
         spawn=sim_utils.UsdFileCfg(
@@ -148,6 +217,57 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.2, 0.15, 0.03)),
     )
 
+    top = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/CameraTop",
+        update_period=0.1,
+        height=CAM_HEIGHT,
+        width=CAM_WIDTH,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.01, 1.0e5),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.0, -0.1, 0.5),
+            rot=look_at_quat((0.0, -0.1, 0.5), (0.0, 0.0, 0.0)),
+            convention="opengl",
+        ),
+    )
+
+    gripper_cam = CameraCfg(
+            # 相机在 USD stage 中的 prim 路径（挂在 gripper_static_1 下）
+            prim_path="{ENV_REGEX_NS}/Piper/camera_link/gripper_cam",
+            update_period=0.1,  # 传感器输出周期（秒）：每 0.1s 输出一次数据
+            height=CAM_HEIGHT,  # 输出图像分辨率（像素）
+            width=CAM_WIDTH,
+            data_types=["rgb"],  # 需要的输出数据类型（此处只要 RGB 图像）
+            # Pinhole 相机模型参数（内参/成像模型）
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=24.0,  # 焦距（与 horizontal_aperture 配合计算内参），示例值 24.0
+                focus_distance=400.0,  # 对焦距离（与场景单位一致）
+                horizontal_aperture=20.955,  # 传感器水平孔径（单位与 focal_length 保持一致）
+                clipping_range=(0.01, 1.0e5),  # 裁剪近平面和远平面（场景距离单位）
+            ),
+            # 相机相对父体的位姿偏移
+            offset=CameraCfg.OffsetCfg(
+                pos=(
+                    0.0,
+                    0.12,
+                    0.0,
+                ),  # 平移偏移（x, y, z），单位为场景距离（通常米）
+                # 旋转偏移：四元数 (w, x, y, z)
+                # 注意：四元数方向和符号需要与场景其他部分一致（此处来源于 MuJoCo->Isaac 的映射）
+                rot=look_at_quat(
+                    (0.0, 0.12, 0.0), (0.0, 0.0, -0.05), reverse=True
+                ),  # 测试为正好看到夹爪 (x:-67,y:0,z:0)
+                convention="opengl",  # 偏移的解释约定，例如 "world" 表示以世界/绝对参照解释，
+            ),
+        )
+
+    
+    
 # 创建一个 piperSim 包括 robot 和一些工具函数，放在 isaac_piper.py 中
 class PiperSim:
     def __init__(self, scene: InteractiveScene):
@@ -351,9 +471,6 @@ class PiperSim:
         return trajectory
 
 
-def main():
-    pass
-
 # Rx = roll, Ry = pitch, Rz = yaw
 def quat_from_euler_xyz(rx, ry, rz):
     """从 extrinsic XYZ Euler 角（弧度）转为四元数 [w, x, y, z]。
@@ -468,7 +585,7 @@ def test_ik():
         [0.7855, 1.6362, -1.0047, 0.0, 1.0245, 1.3087, 0.0],
         [0.0, 0.0566, 0.0, 0.0, 0.0, 0.0, 0.070]
     ]
-    targets_end = [ # zyx
+    targets_end = [ # zyx 单位 m
         [[0.06, 0.0, 0.21], [0.0, 85.0, -0.0]],
         [[0.2, 0.2, 0.2], [-150.03, 0.09, -179.91]],
         [[0.06, 0.0, 0.21], [0.0, 88.24, -0.0]],
@@ -515,7 +632,7 @@ def test_ik():
 
             # 6. 用 get_arm_pos() 的结果做 IK 求解验证
             # print("--- IK 验证 ---")
-            piper.set_arm_pos(pos, quat, gripper_open_m=ang[6])
+            piper.set_arm_pos(pos, quat, gripper_open_m=ang[6]) # 这个好像有问题？
             pos_after, quat_after = piper.get_arm_pos()
             # print(f"IK后 pos={pos_after}, quat={quat_after}")
             # print(f"  IK pos误差: {[round(a-b,5) for a,b in zip(pos, pos_after)]}")
@@ -526,7 +643,7 @@ def test_ik():
             ik_result = piper.isaac_ik_trace(pos, quat, steps=1)
             
             # 将 ik 的末端位姿 传给 set_arm_angles
-            piper.set_arm_angles(angles_rad=ik_result[-1], gripper_open_m=0.070)
+            # piper.set_arm_angles(angles_rad=ik_result[-1], gripper_open_m=0.070)
 
             # 到位后保持 2 秒观察
             for _ in range(240):
@@ -536,7 +653,76 @@ def test_ik():
         break
     
 
+# 实现 remote control 将 小机械臂的末端位姿 通过 udp 传给仿真，验证 IK 求解和坐标系转换的正确性
+IP = "0.0.0.0"
+PORT = 3456
+CONTROL_MODE = "tor" # "pos" or "tor"
+SCALE_POS = 2  # 位置缩放，配合真机坐标系调整
+# 需要做个一个 坐标映射
+def main():
+    import socket
+    import json
+
+    sim_cfg = sim_utils.SimulationCfg(dt=1/120, device="cuda:0")
+    sim = sim_utils.SimulationContext(sim_cfg)
+    sim.set_camera_view([0.6, 0.6, 0.5], [0.0, 0.0, 0.2])
+
+    scene_cfg = PiperDemoSceneCfg(num_envs=1, env_spacing=2.0)
+    scene = InteractiveScene(scene_cfg)
+
+    sim.reset()
+    scene.reset()
+
+    piper = PiperSim(scene)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    sock.bind((IP, PORT))
+    print(f"[INFO]: Listening on {IP}:{PORT}, mode={CONTROL_MODE}")
+
+    kb = KeyboardController()
+    kb.start()
+
+    while simulation_app.is_running():
+        data = None
+        try:
+            while True:
+                data, _ = sock.recvfrom(4096)
+        except BlockingIOError:
+            pass
+
+        if data is None:
+            scene.write_data_to_sim()
+            sim.step()
+            scene.update(sim.cfg.dt)
+            continue
+
+        try:
+            msg = json.loads(data.decode("utf-8"))
+
+            if CONTROL_MODE == "tor":
+                pos = msg.get("position") or msg.get("pos")
+                quat = msg.get("orientation") or msg.get("quat")
+                print(f"Received pos: {pos}, quat: {quat}")
+                gripper = msg.get("gripper_open_m", 0.070)
+                # 这里的 pos 和 quat 乘缩放比例后  xyz z高度轴不缩放
+                pos = [pos[0] * SCALE_POS, pos[1] * SCALE_POS, pos[2]]  # 只缩放 x 和 y
+                piper.set_arm_pos(pos, quat, gripper_open_m=gripper)
+            else:
+                angles = msg["rad_angles"]
+                gripper = msg.get("gripper_open_m", 0.070)
+                piper.set_arm_angles(angles_rad=angles, gripper_open_m=gripper)
+
+            if kb.pop("R"):
+                sim.reset()
+                scene.reset()
+                piper = PiperSim(scene)
+                print("[INFO]: Reset")
+
+        except Exception as e:
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
     test_ik()
+    # main()
     simulation_app.close()
