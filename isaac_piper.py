@@ -63,6 +63,7 @@ DEBUG_MODE = False  # 调试模式
 
 USD_PATH = "/home/hyl/isaac-sim-lerobot/assets/piper_isaac_sim/USD/piper_v2_robot.usd"
 OBJ_PATH = "/home/hyl/isaac-sim-lerobot/assets/scenes/kitchen_with_orange/assets/Orange001/Orange001.usd"
+OBJ2_PATH = "/home/hyl/isaac-sim-lerobot/assets/fruit/green_apple.usd"
 
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "joint8"]
 BODY_NAMES = ["arm_base", "link1", "link2", "link3", "link4", "link5", "link6", "link7", "link8"]
@@ -78,6 +79,16 @@ PIPER_NAME = "piper"
 # 相机参数
 CAM_HEIGHT = 480
 CAM_WIDTH = 640
+
+# 物体放置参数
+OBJ_L = 0.02
+OBJ_W = 0.08
+OBJ_H = 0.03
+OBJ_Z = OBJ_H / 2  # half cube size, sitting on ground
+OBJ_PX = 1
+OBJ_PY = 0.15
+OBJ_PZ = OBJ_Z
+
 
 # 相机视角的四元数，从哪看到哪
 def look_at_quat(
@@ -207,15 +218,6 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             ),
         },
     )
-    
-    orange = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Orange",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=OBJ_PATH,
-            scale=(0.5, 0.5, 0.5),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.2, 0.15, 0.03)),
-    )
 
     top = CameraCfg(
         prim_path="{ENV_REGEX_NS}/CameraTop",
@@ -266,8 +268,71 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             ),
         )
 
+    cube = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Cube",
+        spawn=sim_utils.CuboidCfg(
+            size=(OBJ_L, OBJ_W, OBJ_H),  # 立方体尺寸
+            activate_contact_sensors=True,  # 启用 sensors
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                linear_damping=2.0,
+                angular_damping=2.0,
+                max_linear_velocity=1.0,
+                max_angular_velocity=57.3,
+                disable_gravity=False,
+                kinematic_enabled=False,
+                max_depenetration_velocity=1.0,  # 降低：防止穿透后弹飞
+                solver_position_iteration_count=16,  # 提高：更精确的接触求解
+                solver_velocity_iteration_count=4,
+                sleep_threshold=0.005,
+                stabilization_threshold=0.001,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(
+                mass=0.001,  # 质量 0.02kg，适当的质量提高稳定性
+                # density=500.0,            # 密度 500kg/m³
+            ),
+            # 碰撞属性配置 - 关键参数用于提高抓取成功率
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.002,  # 必须远小于物体最薄维度(1cm)的一半
+                rest_offset=0.0,  # 零间隙，紧密接触
+                torsional_patch_radius=0.04,
+                min_torsional_patch_radius=0.01,
+            ),
+            # 物理材质属性 - 高摩擦低弹性，便于抓取
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.5,  # 合理范围：橡胶~1.0-2.0
+                dynamic_friction=1.0,
+                restitution=0,
+                friction_combine_mode="average",  # average 更稳定，避免 multiply 导致极端值
+                restitution_combine_mode="max",
+            ),
+            # 视觉材质
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.8, 0.1, 0.1)
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(OBJ_PX, OBJ_PY, OBJ_PZ),
+        ),
+    )
     
-    
+    orange = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Orange",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=OBJ_PATH,
+            scale=(0.5, 0.5, 0.5),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.2, 0.15, 0.03)),
+    )
+
+    apple = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Apple",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=OBJ2_PATH,
+            scale=(0.05, 0.05, 0.05),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.2, 0.15, 0.08)),
+    )
+
 # 创建一个 piperSim 包括 robot 和一些工具函数，放在 isaac_piper.py 中
 class PiperSim:
     def __init__(self, scene: InteractiveScene):
@@ -470,6 +535,10 @@ class PiperSim:
 
         return trajectory
 
+    # 修改物体位置
+    def set_object_pos(self, obj_name, pos, quat=[1, 0, 0, 0]):
+        obj = self._scene[obj_name]
+        obj.set_world_pose(pos, quat)
 
 # Rx = roll, Ry = pitch, Rz = yaw
 def quat_from_euler_xyz(rx, ry, rz):
@@ -652,6 +721,35 @@ def test_ik():
                 scene.update(sim.cfg.dt)
         break
     
+# 物体随机放置范围（机械臂前方区域）
+OBJ_X_RANGE = (0.10, 0.25)
+OBJ_Y_RANGE = (-0.10, 0.10)
+OBJ_Z_FIXED = 0.03
+
+def test_obj():
+    sim_cfg = sim_utils.SimulationCfg(dt=1/120, device="cuda:0")
+    sim = sim_utils.SimulationContext(sim_cfg)
+    sim.set_camera_view([0.6, 0.4, 0.4], [0.0, 0.0, 0.1])
+
+    scene = InteractiveScene(PiperDemoSceneCfg(num_envs=1, env_spacing=2.0))
+    sim.reset()
+
+    stage = get_current_stage()
+    orange_prim = stage.GetPrimAtPath("/World/envs/env_0/Orange")
+    xform = UsdGeom.Xformable(orange_prim)
+
+    for i in range(10):
+        x = random.uniform(*OBJ_X_RANGE)
+        y = random.uniform(*OBJ_Y_RANGE)
+        xform.ClearXformOpOrder()
+        xform.AddTranslateOp().Set(Gf.Vec3d(x, y, OBJ_Z_FIXED))
+        print(f"[{i+1}/10] Orange -> ({x:.3f}, {y:.3f}, {OBJ_Z_FIXED})")
+
+        # 保持 3 秒 (120Hz * 3s = 360 steps)
+        for _ in range(360):
+            scene.write_data_to_sim()
+            sim.step()
+            scene.update(sim.cfg.dt)
 
 # 实现 remote control 将 小机械臂的末端位姿 通过 udp 传给仿真，验证 IK 求解和坐标系转换的正确性
 IP = "0.0.0.0"
@@ -723,6 +821,7 @@ def main():
             print(f"Error: {e}")
 
 if __name__ == "__main__":
-    test_ik()
+    # test_ik()
+    test_obj()
     # main()
     simulation_app.close()
