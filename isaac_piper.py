@@ -56,8 +56,9 @@ from isaaclab.markers import VisualizationMarkersCfg
 
 import h5py
 import random
+import time
 
-DEBUG_MODE = False  # 调试模式
+DEBUG_MODE = True  # 调试模式
 # 启用后方块位置固定
 # 启用后输出日志
 
@@ -81,13 +82,25 @@ CAM_HEIGHT = 480
 CAM_WIDTH = 640
 
 # 物体放置参数
-OBJ_L = 0.02
-OBJ_W = 0.08
+OBJ_L = 0.08
+OBJ_W = 0.02
 OBJ_H = 0.03
 OBJ_Z = OBJ_H / 2  # half cube size, sitting on ground
-OBJ_PX = 1
+# 0.2, 0.15, 0.03
+OBJ_PX = 0.2
 OBJ_PY = 0.15
 OBJ_PZ = OBJ_Z
+
+
+PRE_GRASP_HEIGHT = 0.12  # 预抓取高度（物体上方）
+LIFT_HEIGHT = 0.12       # 抓取后抬升高度
+GRASP_SETTLE_STEPS = 60  # 每个动作后等待稳定的仿真步数
+MIN_Z = 0.04             # 末端最低高度，防止穿过地板
+# 安全准备位姿的关节角度（手臂抬起，夹爪朝前下方，远离奇异点）
+READY_JOINTS_RAD = [0.0, 0.8, -0.4, 0.0, 1.2, 0.0]
+
+
+GRASP_OPEN = 0.10  #  夹爪张开时的 开口距离
 
 
 # 相机视角的四元数，从哪看到哪
@@ -151,8 +164,6 @@ def look_at_quat(
         z = 0.25 * s
     return (w, x, y, z)
 
-
-
 class KeyboardController:
     def __init__(self):
         self._key_states = {}
@@ -195,9 +206,15 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Piper",
         spawn=sim_utils.UsdFileCfg(
             usd_path=USD_PATH,
-            activate_contact_sensors=False,
+            activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
+                max_depenetration_velocity=1.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=True,
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=8,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
@@ -205,14 +222,14 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             "arm": ImplicitActuatorCfg(
                 joint_names_expr=["joint[1-6]"],
                 effort_limit_sim=20.0,
-                velocity_limit_sim=5.0,
-                stiffness=200.0,
-                damping=20.0,
+                velocity_limit_sim=1.0,
+                stiffness=100.0,
+                damping=60.0,
             ),
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["joint[7-8]"],
                 effort_limit_sim=5.0,
-                velocity_limit_sim=5.0,
+                velocity_limit_sim=0.5,
                 stiffness=50.0,
                 damping=5.0,
             ),
@@ -321,7 +338,7 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             usd_path=OBJ_PATH,
             scale=(0.5, 0.5, 0.5),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.2, 0.15, 0.03)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(1, 0.15, 0.03)),
     )
 
     apple = AssetBaseCfg(
@@ -330,7 +347,7 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             usd_path=OBJ2_PATH,
             scale=(0.05, 0.05, 0.05),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.2, 0.15, 0.08)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(-1, 0.15, 0.08)),
     )
 
 # 创建一个 piperSim 包括 robot 和一些工具函数，放在 isaac_piper.py 中
@@ -349,6 +366,24 @@ class PiperSim:
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0] - 1
         else:
             self._ee_jacobi_idx = self._robot_entity_cfg.body_ids[0]
+
+        # 为夹爪 link7/link8 绑定高摩擦物理材质，使其能夹住物体
+        gripper_mat_cfg = sim_utils.RigidBodyMaterialCfg(
+            static_friction=2.0,
+            dynamic_friction=1.5,
+            restitution=0.0,
+            friction_combine_mode="average",
+        )
+        material_pattern = f"{scene.env_regex_ns}/Piper/physicsMaterial_gripper"
+        gripper_mat_cfg.func(material_pattern, gripper_mat_cfg)
+        for link_name in ["link7", "link8"]:
+            link_paths = sim_utils.find_matching_prim_paths(
+                f"{scene.env_regex_ns}/Piper/{link_name}"
+            )
+            for link_path in link_paths:
+                parent = link_path.rsplit("/", 1)[0]
+                mat_path = f"{parent}/physicsMaterial_gripper"
+                sim_utils.bind_physics_material(link_path, mat_path)
         
     # 获取当前关节角度
     def get_joint_angles(self):
@@ -415,6 +450,7 @@ class PiperSim:
         gripper_open_m: float | int | None = None,
     ) -> bool:
         """
+        set_arm_angles 是一步到位的
         设置关节角度和夹爪开合，与真机 SDK 录制格式一致。
 
         Args:
@@ -422,6 +458,9 @@ class PiperSim:
             gripper_open_m: 夹爪开口距离，单位米（与 CSV 录制值一致：SDK μm / 1e6）
         """
         joint_pos_t = self._robot.data.joint_pos.clone()
+        
+        # if DEBUG_MODE:
+        #     print(f"DEBUG: Setting joint angles: {angles_rad}, gripper open: {gripper_open_m:.3f}m")
 
         if angles_rad is not None:
             rads = torch.tensor(list(angles_rad), dtype=torch.float32, device=self._sim.device)
@@ -431,7 +470,7 @@ class PiperSim:
             g = (float(gripper_open_m) / self.GRIPPER_MAX_OPEN_M) * self.GRIPPER_MAX_RAD
             g = max(0.0, min(self.GRIPPER_MAX_RAD, g))
             joint_pos_t[0, 6] = g
-            joint_pos_t[0, 7] = g
+            joint_pos_t[0, 7] = -g
 
         joint_vel = torch.zeros_like(joint_pos_t)
         self._robot.write_joint_state_to_sim(joint_pos_t, joint_vel)
@@ -447,6 +486,7 @@ class PiperSim:
     # 末端位姿（base frame），与真机 SDK GetArmEndPoseMsgs 一致
     def set_arm_pos(self, target_pos_b, target_quat_b, gripper_open_m=0.070, solve_steps=1):
         """
+        非一步到位的 ， 根据步数进行插值
         IK 求解并驱动到目标末端位姿。
 
         Args:
@@ -462,12 +502,13 @@ class PiperSim:
         quat_sim = self._quat_mul(quat_t, offset_inv)
         target_quat_sim = quat_sim.squeeze(0).tolist()
 
-        trajectory = self.isaac_ik_trace(target_pos_b, target_quat_sim, steps=solve_steps)
+        # isaac_ik_trace 已经调用 移动了
+        trajectory = self.isaac_ik_trace(target_pos_b, target_quat_sim, steps=solve_steps, gripper_open_m=gripper_open_m)
 
-        for joint_angles in trajectory:
-            self.set_arm_angles(angles_rad=joint_angles[:6], gripper_open_m=gripper_open_m)
+        # for joint_angles in trajectory:
+        #     self.set_arm_angles(angles_rad=joint_angles[:6], gripper_open_m=gripper_open_m)
 
-    def isaac_ik_trace(self, target_pos_b, target_quat_b, steps=1):
+    def isaac_ik_trace(self, target_pos_b, target_quat_b, steps=1, gripper_open_m=None):
         """
         基于 Link6 末端位姿（base frame），用迭代 DifferentialIK 求解关节角度。
         每步都通过仿真更新 Jacobian 以保证位置和姿态同时收敛。
@@ -476,6 +517,7 @@ class PiperSim:
             target_pos_b: 目标末端位置 [x,y,z]，base frame，单位米
             target_quat_b: 目标末端四元数 [w,x,y,z]，base frame
             steps: 插值步数
+            gripper_open_m: 夹爪开口距离，IK 迭代中保持不变
 
         Returns:
             list[list[float]]: 长度为 steps 的轨迹点，每项为 6 个关节弧度
@@ -483,6 +525,14 @@ class PiperSim:
         steps = max(int(steps), 1)
         device = self._sim.device
         ecfg = self._robot_entity_cfg
+
+        # 计算夹爪关节目标值，在 IK 迭代中保持
+        if gripper_open_m is not None:
+            g = (float(gripper_open_m) / self.GRIPPER_MAX_OPEN_M) * self.GRIPPER_MAX_RAD
+            g = max(0.0, min(self.GRIPPER_MAX_RAD, g))
+            gripper_rad = g
+        else:
+            gripper_rad = None
 
         pos_b = torch.tensor(target_pos_b, dtype=torch.float32, device=device).reshape(1, 3)
         quat_b = torch.tensor(target_quat_b, dtype=torch.float32, device=device).reshape(1, 4)
@@ -525,6 +575,9 @@ class PiperSim:
 
                 full_target = self._robot.data.joint_pos.clone()
                 full_target[:, ecfg.joint_ids] = arm_joint_des
+                if gripper_rad is not None:
+                    full_target[:, 6] = gripper_rad
+                    full_target[:, 7] = -gripper_rad
                 self._robot.write_joint_state_to_sim(full_target, torch.zeros_like(full_target))
                 self._robot.set_joint_position_target(full_target)
                 self._scene.write_data_to_sim()
@@ -539,6 +592,166 @@ class PiperSim:
     def set_object_pos(self, obj_name, pos, quat=[1, 0, 0, 0]):
         obj = self._scene[obj_name]
         obj.set_world_pose(pos, quat)
+    
+    def _settle(self, steps=None):
+        """等待仿真稳定。"""
+        steps = steps or GRASP_SETTLE_STEPS
+        for _ in range(steps):
+            self._scene.write_data_to_sim()
+            self._sim.step()
+            self._scene.update(self._sim.cfg.dt)
+
+    def _move_to_ready(self, gripper_open_m=GRASP_OPEN):
+        """移动到安全准备位姿，避免 IK 从零位出发经过奇异点。"""
+        self.set_arm_angles(angles_rad=READY_JOINTS_RAD, gripper_open_m=gripper_open_m)
+        self._settle(steps=20)
+
+    def _grasp_quat(self, rot_rad: float):
+        """计算朝下抓取的四元数 [w,x,y,z]。
+        使用 ry=90°(pitch down) 让末端朝 -Z，比 rx=180° 更稳定，避免万向锁。"""
+        rx = np.pi
+        ry = 0.0
+        rz = rot_rad
+        q = quat_from_euler_xyz(rx, ry, rz)
+        if q[0] < 0:
+            q = -q
+        return q.tolist()
+
+    def control_gripper(self, gripper_open_m=0.01, steps=10):
+        """渐进式控制夹爪开合，按步骤逐步到达目标开口距离"""
+        current_pos = self._robot.data.joint_pos[0, 6].item()
+        target_g = (float(gripper_open_m) / self.GRIPPER_MAX_OPEN_M) * self.GRIPPER_MAX_RAD
+        target_g = max(0.0, min(self.GRIPPER_MAX_RAD, target_g))
+
+        for i in range(1, steps + 1):
+            alpha = i / steps
+            g = current_pos + alpha * (target_g - current_pos)
+            joint_pos_t = self._robot.data.joint_pos.clone()
+            joint_pos_t[0, 6] = g
+            joint_pos_t[0, 7] = -g
+            self._robot.set_joint_position_target(joint_pos_t)
+            self._scene.write_data_to_sim()
+            self._sim.step()
+            self._scene.update(self._sim.cfg.dt)
+        
+
+    # catch 函数
+    def catch(
+        self,
+        target_x: float,
+        target_y: float,
+        rot_rad: float,
+        height: float,
+    ) -> bool:
+        """执行抓取动作。
+        Args:
+            target_x: 抓取点 x 坐标，单位为米。
+            target_y: 抓取点 y 坐标，单位为米。
+            rot_rad: 抓取时末端绕 z 轴的旋转角，单位为弧度。
+            height: 抓取高度，单位为米；
+
+        Returns:
+            抓取是否成功。
+        """
+        self._move_to_ready(gripper_open_m=GRASP_OPEN)
+
+        quat = self._grasp_quat(rot_rad)
+        grasp_z = max(height, MIN_Z)
+
+        # 1. 张开夹爪，移动到预抓取位置（目标上方）
+        pre_pos = [target_x, target_y, grasp_z + PRE_GRASP_HEIGHT + LIFT_HEIGHT]
+        print(f"[catch 1/4] 移动到预抓取位置: pos={pre_pos}, gripper=OPEN")
+        t0 = time.time()
+        self.set_arm_pos(pre_pos, quat, gripper_open_m=GRASP_OPEN, solve_steps=30)
+        self._settle(steps=30)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+
+        # # 2. 下降到抓取高度
+        grasp_pos = [target_x, target_y, grasp_z + PRE_GRASP_HEIGHT ]
+        print(f"[catch 2/4] 下降到抓取高度: pos={grasp_pos}, gripper=OPEN")
+        t0 = time.time()
+        self.set_arm_pos(grasp_pos, quat, gripper_open_m=GRASP_OPEN, solve_steps=30)
+        self._settle(steps=30)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+
+        # 3. 闭合夹爪
+        print(f"[catch 3/4] 闭合夹爪: pos={grasp_pos}, gripper=CLOSE")
+        t0 = time.time()
+        # self.set_arm_pos(grasp_pos, quat, gripper_open_m=0.0, solve_steps=1)
+        self.control_gripper(gripper_open_m=0.0, steps=30)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+        self._settle(steps=480)
+        if DEBUG_MODE: print(f"  -> 等待时长: {time.time()-t0:.2f}s")
+
+        # # 4. 抬升
+        lift_pos = [target_x, target_y, grasp_z + PRE_GRASP_HEIGHT + LIFT_HEIGHT]
+        print(f"[catch 4/4] 抬升: pos={lift_pos}, gripper=CLOSE")
+        t0 = time.time()
+        self.set_arm_pos(lift_pos, quat, gripper_open_m=0.0, solve_steps=30)
+        self._settle(steps=30)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+
+        return True
+
+    # place 函数
+    def place(
+        self,
+        target_x: float,
+        target_y: float,
+        target_z: float,
+        rot_rad: float = 0,
+        down: bool = False,
+    ) -> bool:
+        """执行放置动作。
+
+        Args:
+            target_x: 放置点 x 坐标，单位为米。
+            target_y: 放置点 y 坐标，单位为米。
+            target_z: 放置点 z 坐标，单位为米。
+            rot_rad: 放置时末端绕 z 轴的旋转角，单位为弧度。
+            down: 是否下降后再放置，默认为False。
+        Returns:
+            放置是否成功。
+        """
+        quat = self._grasp_quat(rot_rad)
+        place_z = max(target_z, MIN_Z)
+
+        # 1. 移动到放置点上方
+        pre_pos = [target_x, target_y, place_z + PRE_GRASP_HEIGHT]
+        print(f"[place 1/4] 移动到放置点上方: pos={pre_pos}, gripper=CLOSE")
+        t0 = time.time()
+        self.set_arm_pos(pre_pos, quat, gripper_open_m=0.0, solve_steps=5)
+        self._settle(steps=30)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+
+        # 2. 如果 down=True，下降到放置高度
+        if down:
+            place_pos = [target_x, target_y, place_z]
+            print(f"[place 2/4] 下降到放置高度: pos={place_pos}, gripper=CLOSE")
+            t0 = time.time()
+            self.set_arm_pos(place_pos, quat, gripper_open_m=0.0, solve_steps=3)
+            self._settle(steps=30)
+            if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+        else:
+            place_pos = pre_pos
+            print(f"[place 2/4] 跳过下降（down=False）")
+
+        # 3. 张开夹爪释放物体
+        print(f"[place 3/4] 张开夹爪释放: pos={place_pos}, gripper=OPEN")
+        t0 = time.time()
+        self.set_arm_pos(place_pos, quat, gripper_open_m=GRASP_OPEN, solve_steps=1)
+        self._settle(steps=60)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+
+        # 4. 抬升离开
+        retreat_pos = [target_x, target_y, place_z + LIFT_HEIGHT]
+        print(f"[place 4/4] 抬升离开: pos={retreat_pos}, gripper=OPEN")
+        t0 = time.time()
+        self.set_arm_pos(retreat_pos, quat, gripper_open_m=GRASP_OPEN, solve_steps=3)
+        self._settle(steps=30)
+        if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
+
+        return True
 
 # Rx = roll, Ry = pitch, Rz = yaw
 def quat_from_euler_xyz(rx, ry, rz):
@@ -751,6 +964,67 @@ def test_obj():
             sim.step()
             scene.update(sim.cfg.dt)
 
+def catch_and_place_test():
+    sim_cfg = sim_utils.SimulationCfg(dt=1/120, device="cuda:0")
+    sim = sim_utils.SimulationContext(sim_cfg)
+    sim.set_camera_view([0.6, 0.4, 0.4], [0.0, 0.0, 0.1])
+
+    scene = InteractiveScene(PiperDemoSceneCfg(num_envs=1, env_spacing=2.0))
+    sim.reset()
+    
+    # 将地板贴图替换为 background.jpg
+    # from pxr import Sdf, UsdShade
+    # stage = omni.usd.get_context().get_stage()
+    # ground_shader = UsdShade.Shader.Get(stage, "/World/defaultGroundPlane/Looks/theGrid/Shader")
+    # if ground_shader:
+    #     tex_input = ground_shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset)
+    #     tex_input.Set(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "background.jpg"))
+    #     tint_input = ground_shader.GetInput("diffuse_tint")
+    #     if tint_input:
+    #         tint_input.Set((1.0, 1.0, 1.0))
+
+
+    piper = PiperSim(scene)
+
+    # cube 初始位置 (来自 PiperDemoSceneCfg.cube.init_state)
+    cube_x, cube_y, cube_z = OBJ_PX, OBJ_PY, OBJ_PZ
+    # 放置目标位置
+    place_x, place_y, place_z = 0.2, -0.10, OBJ_PZ
+
+    print(f"[catch_and_place_test] 抓取 cube @ ({cube_x}, {cube_y}, {cube_z})")
+    print(f"[catch_and_place_test] 放置目标 @ ({place_x}, {place_y}, {place_z})")
+
+    # 等待仿真稳定
+    for _ in range(10):
+        scene.write_data_to_sim()
+        sim.step()
+        scene.update(sim.cfg.dt)
+
+    # 抓取 cube
+    success = piper.catch(
+        target_x=cube_x,
+        target_y=cube_y,
+        rot_rad=0.0,
+        height=cube_z,
+    )
+    print(f"[catch_and_place_test] 抓取结果: {success}")
+
+    # 放置到目标位置
+    # success = piper.place(
+    #     target_x=place_x,
+    #     target_y=place_y,
+    #     target_z=place_z,
+    #     rot_rad=0.0,
+    #     down=True,
+    # )
+    # print(f"[catch_and_place_test] 放置结果: {success}")
+
+    # 保持观察
+    while simulation_app.is_running():
+        scene.write_data_to_sim()
+        sim.step()
+        scene.update(sim.cfg.dt)
+
 # 实现 remote control 将 小机械臂的末端位姿 通过 udp 传给仿真，验证 IK 求解和坐标系转换的正确性
 IP = "0.0.0.0"
 PORT = 3456
@@ -770,6 +1044,7 @@ def main():
 
     sim.reset()
     scene.reset()
+
 
     piper = PiperSim(scene)
 
@@ -822,6 +1097,7 @@ def main():
 
 if __name__ == "__main__":
     # test_ik()
-    test_obj()
+    # test_obj()
+    catch_and_place_test()
     # main()
     simulation_app.close()
