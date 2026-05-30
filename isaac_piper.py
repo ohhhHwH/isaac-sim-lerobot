@@ -304,7 +304,7 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
                 stabilization_threshold=0.001,
             ),
             mass_props=sim_utils.MassPropertiesCfg(
-                mass=0.001,  # 质量 0.02kg，适当的质量提高稳定性
+                mass=0.0005,
                 # density=500.0,            # 密度 500kg/m³
             ),
             # 碰撞属性配置 - 关键参数用于提高抓取成功率
@@ -369,8 +369,8 @@ class PiperSim:
 
         # 为夹爪 link7/link8 绑定高摩擦物理材质，使其能夹住物体
         gripper_mat_cfg = sim_utils.RigidBodyMaterialCfg(
-            static_friction=2.0,
-            dynamic_friction=1.5,
+            static_friction=4.0,
+            dynamic_friction=3.0,
             restitution=0.0,
             friction_combine_mode="average",
         )
@@ -484,7 +484,7 @@ class PiperSim:
     _EE_OFFSET_QUAT_INV = torch.tensor([[0.7071068, 0.0, 0.0, 0.7071068]])
 
     # 末端位姿（base frame），与真机 SDK GetArmEndPoseMsgs 一致
-    def set_arm_pos(self, target_pos_b, target_quat_b, gripper_open_m=0.070, solve_steps=1):
+    def set_arm_pos(self, target_pos_b, target_quat_b, gripper_open_m=0.070, solve_steps=1, smooth=False):
         """
         非一步到位的 ， 根据步数进行插值
         IK 求解并驱动到目标末端位姿。
@@ -494,6 +494,7 @@ class PiperSim:
             target_quat_b: 末端姿态四元数 [w,x,y,z]，base frame（真机坐标系）
             gripper_open_m: 夹爪开口距离，单位米
             solve_steps: IK 求解步数，默认1
+            smooth: 平滑模式，夹持物体时使用，防止瞬移穿模
         """
         # 将真机坐标系四元数转为仿真 link6 坐标系: Q_sim = Q_real * Q_offset_inv^-1 = Q_real * Q_offset
         device = self._sim.device
@@ -503,12 +504,12 @@ class PiperSim:
         target_quat_sim = quat_sim.squeeze(0).tolist()
 
         # isaac_ik_trace 已经调用 移动了
-        trajectory = self.isaac_ik_trace(target_pos_b, target_quat_sim, steps=solve_steps, gripper_open_m=gripper_open_m)
+        trajectory = self.isaac_ik_trace(target_pos_b, target_quat_sim, steps=solve_steps, gripper_open_m=gripper_open_m, smooth=smooth)
 
         # for joint_angles in trajectory:
         #     self.set_arm_angles(angles_rad=joint_angles[:6], gripper_open_m=gripper_open_m)
 
-    def isaac_ik_trace(self, target_pos_b, target_quat_b, steps=1, gripper_open_m=None):
+    def isaac_ik_trace(self, target_pos_b, target_quat_b, steps=1, gripper_open_m=None, smooth=False):
         """
         基于 Link6 末端位姿（base frame），用迭代 DifferentialIK 求解关节角度。
         每步都通过仿真更新 Jacobian 以保证位置和姿态同时收敛。
@@ -518,6 +519,7 @@ class PiperSim:
             target_quat_b: 目标末端四元数 [w,x,y,z]，base frame
             steps: 插值步数
             gripper_open_m: 夹爪开口距离，IK 迭代中保持不变
+            smooth: 平滑模式，不瞬移关节，只用位置目标驱动（夹持物体时使用） - 该模式有 BUG
 
         Returns:
             list[list[float]]: 长度为 steps 的轨迹点，每项为 6 个关节弧度
@@ -552,8 +554,13 @@ class PiperSim:
             self._ik_controller.reset()
             self._ik_controller.set_command(ik_command)
 
-            # 迭代求解当前子目标（位置+姿态收敛）
-            for _ in range(200):
+            max_iters = 20 if smooth else 20
+            pos_tol = 0.01 if smooth else 0.01
+            rot_tol = 1.0 if smooth else 1.0
+            stall_count = 0
+            prev_err = float('inf')
+
+            for iter_idx in range(max_iters):
                 ee_pose_w = self._robot.data.body_pose_w[:, ecfg.body_ids[0]]
                 ee_pos_b, ee_quat_b = subtract_frame_transforms(
                     root_pose_w[:, 0:3], root_pose_w[:, 3:7],
@@ -565,9 +572,22 @@ class PiperSim:
                 )
                 pos_err = torch.norm(pos_error).item()
                 rot_err = torch.norm(rot_error).item()
+                total_err = pos_err + rot_err * 0.1
 
-                if pos_err < 0.001 and rot_err < 0.01:
+                if pos_err < pos_tol and rot_err < rot_tol:
                     break
+
+                # smooth 模式超时：误差不再下降则退出
+                if smooth:
+                    if total_err >= prev_err - 1e-5:
+                        stall_count += 1
+                    else:
+                        stall_count = 0
+                    prev_err = total_err
+                    if stall_count >= 8:
+                        if DEBUG_MODE:
+                            print(f"  [smooth] stall at step {i}/{steps}, iter {iter_idx}, pos_err={pos_err:.4f}, rot_err={rot_err:.3f}")
+                        break
 
                 jacobian = self._robot.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, ecfg.joint_ids]
                 joint_pos = self._robot.data.joint_pos[:, ecfg.joint_ids]
@@ -575,14 +595,23 @@ class PiperSim:
 
                 full_target = self._robot.data.joint_pos.clone()
                 full_target[:, ecfg.joint_ids] = arm_joint_des
+
                 if gripper_rad is not None:
                     full_target[:, 6] = gripper_rad
                     full_target[:, 7] = -gripper_rad
-                self._robot.write_joint_state_to_sim(full_target, torch.zeros_like(full_target))
-                self._robot.set_joint_position_target(full_target)
-                self._scene.write_data_to_sim()
-                self._sim.step()
-                self._scene.update(self._sim.cfg.dt)
+
+                if smooth:
+                    self._robot.set_joint_position_target(full_target)
+                    for _ in range(3):
+                        self._scene.write_data_to_sim()
+                        self._sim.step()
+                        self._scene.update(self._sim.cfg.dt)
+                else:
+                    # self._robot.write_joint_state_to_sim(full_target, torch.zeros_like(full_target))
+                    self._robot.set_joint_position_target(full_target)
+                    self._scene.write_data_to_sim()
+                    self._sim.step()
+                    self._scene.update(self._sim.cfg.dt)
 
             trajectory.append(self._robot.data.joint_pos[0, ecfg.joint_ids].tolist())
 
@@ -680,14 +709,14 @@ class PiperSim:
         # self.set_arm_pos(grasp_pos, quat, gripper_open_m=0.0, solve_steps=1)
         self.control_gripper(gripper_open_m=0.0, steps=30)
         if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
-        self._settle(steps=480)
+        self._settle(steps=240)
         if DEBUG_MODE: print(f"  -> 等待时长: {time.time()-t0:.2f}s")
 
         # # 4. 抬升
         lift_pos = [target_x, target_y, grasp_z + PRE_GRASP_HEIGHT + LIFT_HEIGHT]
         print(f"[catch 4/4] 抬升: pos={lift_pos}, gripper=CLOSE")
         t0 = time.time()
-        self.set_arm_pos(lift_pos, quat, gripper_open_m=0.0, solve_steps=30)
+        self.set_arm_pos(lift_pos, quat, gripper_open_m=0.0, solve_steps=50, smooth=False)
         self._settle(steps=30)
         if DEBUG_MODE: print(f"  -> 耗时: {time.time()-t0:.2f}s")
 
@@ -817,8 +846,13 @@ def test_ik():
     # 关节角度: ([0.0, 3.243, 0.0, 0.0, 0.0, 0.0], 0.99) 末端位置: [[0.06, 0.0, 0.21], [0.0, 88.24, -0.0]]
     
     sim_cfg = sim_utils.SimulationCfg(
-        dt=1.0 / 120.0, # 120Hz 更新频率
+        dt=1.0 / 200.0,  # 200Hz：薄物体需要更高频率防穿透
         device="cuda:0",
+        physx=sim_utils.PhysxCfg(
+            enable_ccd=True,
+            enable_stabilization=True,
+            bounce_threshold_velocity=0.2,
+        ),
     )
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view([0.6, 0.4, 0.4], [0.0, 0.0, 0.1])
@@ -940,7 +974,7 @@ OBJ_Y_RANGE = (-0.10, 0.10)
 OBJ_Z_FIXED = 0.03
 
 def test_obj():
-    sim_cfg = sim_utils.SimulationCfg(dt=1/120, device="cuda:0")
+    sim_cfg = sim_utils.SimulationCfg(dt=1.0/200.0, device="cuda:0", physx=sim_utils.PhysxCfg(enable_ccd=True, enable_stabilization=True, bounce_threshold_velocity=0.2))
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view([0.6, 0.4, 0.4], [0.0, 0.0, 0.1])
 
@@ -965,7 +999,7 @@ def test_obj():
             scene.update(sim.cfg.dt)
 
 def catch_and_place_test():
-    sim_cfg = sim_utils.SimulationCfg(dt=1/120, device="cuda:0")
+    sim_cfg = sim_utils.SimulationCfg(dt=1.0/200.0, device="cuda:0", physx=sim_utils.PhysxCfg(enable_ccd=True, enable_stabilization=True, bounce_threshold_velocity=0.2))
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view([0.6, 0.4, 0.4], [0.0, 0.0, 0.1])
 
@@ -994,30 +1028,45 @@ def catch_and_place_test():
     print(f"[catch_and_place_test] 抓取 cube @ ({cube_x}, {cube_y}, {cube_z})")
     print(f"[catch_and_place_test] 放置目标 @ ({place_x}, {place_y}, {place_z})")
 
-    # 等待仿真稳定
-    for _ in range(10):
-        scene.write_data_to_sim()
-        sim.step()
-        scene.update(sim.cfg.dt)
+    for trial in range(3):
+        print(f"\n===== Trial {trial+1}/3 =====")
 
-    # 抓取 cube
-    success = piper.catch(
-        target_x=cube_x,
-        target_y=cube_y,
-        rot_rad=0.0,
-        height=cube_z,
-    )
-    print(f"[catch_and_place_test] 抓取结果: {success}")
+        # 重置机械臂到初始关节角度
+        init_joint_pos = torch.zeros(1, 8, device=sim.device)
+        piper._robot.write_joint_state_to_sim(init_joint_pos, torch.zeros_like(init_joint_pos))
+        piper._robot.set_joint_position_target(init_joint_pos)
 
-    # 放置到目标位置
-    # success = piper.place(
-    #     target_x=place_x,
-    #     target_y=place_y,
-    #     target_z=place_z,
-    #     rot_rad=0.0,
-    #     down=True,
-    # )
-    # print(f"[catch_and_place_test] 放置结果: {success}")
+        # 重置 cube 到初始位置
+        cube_obj: RigidObject = scene["cube"]
+        cube_pos = torch.tensor([[cube_x, cube_y, cube_z]], device=sim.device)
+        cube_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=sim.device)
+        cube_obj.write_root_pose_to_sim(torch.cat([cube_pos, cube_quat], dim=1))
+        cube_obj.write_root_velocity_to_sim(torch.zeros(1, 6, device=sim.device))
+
+        # 等待仿真稳定
+        for _ in range(30):
+            scene.write_data_to_sim()
+            sim.step()
+            scene.update(sim.cfg.dt)
+
+        # 抓取 cube
+        success = piper.catch(
+            target_x=cube_x,
+            target_y=cube_y,
+            rot_rad=0.0,
+            height=cube_z,
+        )
+        print(f"[Trial {trial+1}] 抓取结果: {success}")
+
+        # 放置到目标位置
+        # success = piper.place(
+        #     target_x=place_x,
+        #     target_y=place_y,
+        #     target_z=place_z,
+        #     rot_rad=0.0,
+        #     down=True,
+        # )
+        # print(f"[Trial {trial+1}] 放置结果: {success}")
 
     # 保持观察
     while simulation_app.is_running():
@@ -1035,7 +1084,7 @@ def main():
     import socket
     import json
 
-    sim_cfg = sim_utils.SimulationCfg(dt=1/120, device="cuda:0")
+    sim_cfg = sim_utils.SimulationCfg(dt=1.0/200.0, device="cuda:0", physx=sim_utils.PhysxCfg(enable_ccd=True, enable_stabilization=True, bounce_threshold_velocity=0.2))
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view([0.6, 0.6, 0.5], [0.0, 0.0, 0.2])
 
