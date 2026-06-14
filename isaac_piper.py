@@ -249,8 +249,8 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             clipping_range=(0.01, 1.0e5),
         ),
         offset=CameraCfg.OffsetCfg(
-            pos=(0.0, -0.1, 0.5),
-            rot=look_at_quat((0.0, -0.1, 0.5), (0.0, 0.0, 0.0)),
+            pos=(0.31538, 0.01713, 0.62),
+            rot=(0.70366, 0.06968, 0.06968, 0.70367),
             convention="opengl",
         ),
     )
@@ -272,15 +272,13 @@ class PiperDemoSceneCfg(InteractiveSceneCfg):
             # 相机相对父体的位姿偏移
             offset=CameraCfg.OffsetCfg(
                 pos=(
-                    0.0,
-                    0.12,
-                    0.0,
+                    0.13226,
+                    0.00873,
+                    0.11821,
                 ),  # 平移偏移（x, y, z），单位为场景距离（通常米）
                 # 旋转偏移：四元数 (w, x, y, z)
                 # 注意：四元数方向和符号需要与场景其他部分一致（此处来源于 MuJoCo->Isaac 的映射）
-                rot=look_at_quat(
-                    (0.0, 0.12, 0.0), (0.0, 0.0, -0.05), reverse=True
-                ),  # 测试为正好看到夹爪 (x:-67,y:0,z:0)
+                rot=(-0.7071068, 0.0, 0.0, -0.7071068),
                 convention="opengl",  # 偏移的解释约定，例如 "world" 表示以世界/绝对参照解释，
             ),
         )
@@ -840,7 +838,7 @@ def quat_mul(a, b):
 def test_ik():
 
     # 6个关节角度 + 夹爪开合 ； 末端位姿 [x, y, z, Rx, Ry, Rz]
-    
+
     # 关节角度: ([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.99) 末端位姿: [[0.06, 0.0, 0.21], [0.0, 85.0, -0.0]]
     # 关节角度: ([45.01, 93.744, -57.566, 0.0, 58.702, 74.98], 0.0) 末端位置: [[0.2, 0.2, 0.2], [-150.03, 0.09, -179.91]]
     # 关节角度: ([0.0, 3.243, 0.0, 0.0, 0.0, 0.0], 0.99) 末端位置: [[0.06, 0.0, 0.21], [0.0, 88.24, -0.0]]
@@ -1007,15 +1005,15 @@ def catch_and_place_test():
     sim.reset()
     
     # 将地板贴图替换为 background.jpg
-    # from pxr import Sdf, UsdShade
-    # stage = omni.usd.get_context().get_stage()
-    # ground_shader = UsdShade.Shader.Get(stage, "/World/defaultGroundPlane/Looks/theGrid/Shader")
-    # if ground_shader:
-    #     tex_input = ground_shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset)
-    #     tex_input.Set(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "background.jpg"))
-    #     tint_input = ground_shader.GetInput("diffuse_tint")
-    #     if tint_input:
-    #         tint_input.Set((1.0, 1.0, 1.0))
+    from pxr import Sdf, UsdShade
+    stage = omni.usd.get_context().get_stage()
+    ground_shader = UsdShade.Shader.Get(stage, "/World/defaultGroundPlane/Looks/theGrid/Shader")
+    if ground_shader:
+        tex_input = ground_shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset)
+        tex_input.Set(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "background.jpg"))
+        tint_input = ground_shader.GetInput("diffuse_tint")
+        if tint_input:
+            tint_input.Set((1.0, 1.0, 1.0))
 
 
     piper = PiperSim(scene)
@@ -1079,7 +1077,7 @@ IP = "0.0.0.0"
 PORT = 3456
 CONTROL_MODE = "tor" # "pos" or "tor"
 SCALE_POS = 2  # 位置缩放，配合真机坐标系调整
-# 需要做个一个 坐标映射
+# 需要做个一个 坐标映射 - 存在 BUG
 def main():
     import socket
     import json
@@ -1146,7 +1144,7 @@ def main():
 
 if __name__ == "__main__":
     # test_ik()
-    # test_obj()
-    catch_and_place_test()
+    test_obj()
+    # catch_and_place_test()
     # main()
     simulation_app.close()
