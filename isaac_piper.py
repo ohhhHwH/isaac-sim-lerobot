@@ -1144,7 +1144,7 @@ def main():
 
 if __name__ == "__main__":
     # test_ik()
-    test_obj()
-    # catch_and_place_test()
+    # test_obj()
+    catch_and_place_test()
     # main()
     simulation_app.close()
